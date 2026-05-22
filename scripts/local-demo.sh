@@ -94,20 +94,54 @@ PUBLISH_RESPONSE="$(curl --silent --fail \
   -d "${PUBLISH_BODY}" \
   http://127.0.0.1:17747/v1/objects)"
 
-OBJECT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["object_id"])' <<<"${PUBLISH_RESPONSE}")"
-log "published object: ${OBJECT_ID}"
+PARENT_OBJECT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["object_id"])' <<<"${PUBLISH_RESPONSE}")"
+log "published parent object: ${PARENT_OBJECT_ID}"
 
-log "retrieving object by ID"
+CHILD_PUBLISH_BODY="$(PARENT_OBJECT_ID="${PARENT_OBJECT_ID}" python3 - <<'PY'
+import base64
+import json
+import os
+print(json.dumps({
+    "object_type": "insight",
+    "mime_type": "text/plain",
+    "payload_base64": base64.b64encode(b"this insight references the parent fact").decode("ascii"),
+    "tags": ["demo-child"],
+    "references": [os.environ["PARENT_OBJECT_ID"]],
+}))
+PY
+)"
+
+log "publishing child insight that references parent"
+CHILD_PUBLISH_RESPONSE="$(curl --silent --fail \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "${CHILD_PUBLISH_BODY}" \
+  http://127.0.0.1:17747/v1/objects)"
+
+CHILD_OBJECT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["object_id"])' <<<"${CHILD_PUBLISH_RESPONSE}")"
+log "published child object: ${CHILD_OBJECT_ID}"
+
+log "retrieving parent object by ID"
 GET_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${TOKEN}" \
-  "http://127.0.0.1:17747/v1/objects/${OBJECT_ID}")"
+  "http://127.0.0.1:17747/v1/objects/${PARENT_OBJECT_ID}")"
+
+log "retrieving child object by ID"
+CHILD_GET_RESPONSE="$(curl --silent --fail \
+  -H "Authorization: Bearer ${TOKEN}" \
+  "http://127.0.0.1:17747/v1/objects/${CHILD_OBJECT_ID}")"
 
 log "looking up objects by exact tag: demo"
 TAG_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${TOKEN}" \
   http://127.0.0.1:17747/v1/tags/demo)"
 
-GET_RESPONSE="${GET_RESPONSE}" python3 - "${OBJECT_ID}" <<'PY'
+log "looking up referrers for parent"
+REFERRERS_RESPONSE="$(curl --silent --fail \
+  -H "Authorization: Bearer ${TOKEN}" \
+  "http://127.0.0.1:17747/v1/objects/${PARENT_OBJECT_ID}/referrers")"
+
+GET_RESPONSE="${GET_RESPONSE}" python3 - "${PARENT_OBJECT_ID}" <<'PY'
 import base64
 import json
 import os
@@ -118,10 +152,26 @@ assert body["object_id"] == object_id
 assert body["object_type"] == "fact"
 assert base64.b64decode(body["payload_base64"]) == b"hello from hivemind"
 assert body["tags"] == ["demo", "rust"]
+assert body["references"] == []
 assert body["verified"] is True
 PY
 
-TAG_RESPONSE="${TAG_RESPONSE}" python3 - "${OBJECT_ID}" <<'PY'
+CHILD_GET_RESPONSE="${CHILD_GET_RESPONSE}" python3 - "${CHILD_OBJECT_ID}" "${PARENT_OBJECT_ID}" <<'PY'
+import base64
+import json
+import os
+import sys
+child_id = sys.argv[1]
+parent_id = sys.argv[2]
+body = json.loads(os.environ["CHILD_GET_RESPONSE"])
+assert body["object_id"] == child_id
+assert body["object_type"] == "insight"
+assert base64.b64decode(body["payload_base64"]) == b"this insight references the parent fact"
+assert body["references"] == [parent_id]
+assert body["verified"] is True
+PY
+
+TAG_RESPONSE="${TAG_RESPONSE}" python3 - "${PARENT_OBJECT_ID}" <<'PY'
 import json
 import os
 import sys
@@ -133,5 +183,18 @@ assert body["objects"][0]["object_id"] == object_id
 assert body["objects"][0]["object_type"] == "fact"
 PY
 
-log "verified retrieved payload and tag lookup response"
-echo "local demo ok: ${OBJECT_ID}"
+REFERRERS_RESPONSE="${REFERRERS_RESPONSE}" python3 - "${PARENT_OBJECT_ID}" "${CHILD_OBJECT_ID}" <<'PY'
+import json
+import os
+import sys
+parent_id = sys.argv[1]
+child_id = sys.argv[2]
+body = json.loads(os.environ["REFERRERS_RESPONSE"])
+assert body["object_id"] == parent_id
+assert len(body["objects"]) == 1
+assert body["objects"][0]["object_id"] == child_id
+assert body["objects"][0]["object_type"] == "insight"
+PY
+
+log "verified retrieved payloads, tag lookup and reference backlink response"
+echo "local demo ok: ${PARENT_OBJECT_ID} <- ${CHILD_OBJECT_ID}"

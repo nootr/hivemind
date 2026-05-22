@@ -68,6 +68,12 @@ pub struct TagLookupResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ReferrersResponse {
+    pub object_id: String,
+    pub objects: Vec<ObjectSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ObjectSummary {
     pub object_id: String,
     pub object_type: String,
@@ -120,6 +126,7 @@ pub fn app(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/v1/objects", post(publish_object))
         .route("/v1/objects/{object_id}", get(get_object))
+        .route("/v1/objects/{object_id}/referrers", get(get_referrers))
         .route("/v1/tags/{tag}", get(get_tag))
         .route_layer(middleware::from_fn_with_state(
             state.config.clone(),
@@ -260,15 +267,42 @@ async fn get_tag(
         .metadata_store
         .objects_for_tag(&tag)
         .map_err(|err| ApiError::Metadata(err.to_string()))?;
+    let objects = object_summaries_for_ids(&state.metadata_store, object_ids)?;
+
+    Ok(Json(TagLookupResponse { tag, objects }))
+}
+
+async fn get_referrers(
+    State(state): State<AppState>,
+    Path(object_id): Path<String>,
+) -> Result<Json<ReferrersResponse>, ApiError> {
+    let object_id = object_id
+        .parse::<ObjectId>()
+        .map_err(|_| ApiError::InvalidObjectId)?;
+    let object_ids = state
+        .metadata_store
+        .objects_referencing(object_id)
+        .map_err(|err| ApiError::Metadata(err.to_string()))?;
+    let objects = object_summaries_for_ids(&state.metadata_store, object_ids)?;
+
+    Ok(Json(ReferrersResponse {
+        object_id: object_id.to_string(),
+        objects,
+    }))
+}
+
+fn object_summaries_for_ids(
+    metadata_store: &SqliteMetadataStore,
+    object_ids: Vec<ObjectId>,
+) -> Result<Vec<ObjectSummary>, ApiError> {
     let mut objects = Vec::with_capacity(object_ids.len());
 
     for object_id in object_ids {
-        let metadata = state
-            .metadata_store
+        let metadata = metadata_store
             .get_object_metadata(object_id)
             .map_err(|err| ApiError::Metadata(err.to_string()))?
             .ok_or_else(|| {
-                ApiError::Metadata("tag index points to missing object metadata".to_owned())
+                ApiError::Metadata("object index points to missing object metadata".to_owned())
             })?;
         objects.push(ObjectSummary {
             object_id: metadata.object_id.to_string(),
@@ -281,7 +315,7 @@ async fn get_tag(
         });
     }
 
-    Ok(Json(TagLookupResponse { tag, objects }))
+    Ok(objects)
 }
 
 async fn assemble_payload(
@@ -607,6 +641,115 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: TagLookupResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(body.objects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn referrers_requires_auth() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let object_id = "00".repeat(32);
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/v1/objects/{object_id}/referrers"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn referrers_invalid_object_id_returns_bad_request() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(authorized_get_request("/v1/objects/not-an-id/referrers"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn unknown_referrers_returns_empty_list() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let object_id = "00".repeat(32);
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{object_id}/referrers"
+            )))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: ReferrersResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.object_id, object_id);
+        assert!(body.objects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn referrers_returns_objects_referencing_target() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let test_app = test_app(&tempdir);
+        let response = test_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "text/plain",
+                    "payload_base64": STANDARD.encode(b"target"),
+                    "tags": []
+                }),
+            ))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let target: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = test_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "insight",
+                    "mime_type": "text/plain",
+                    "payload_base64": STANDARD.encode(b"source"),
+                    "tags": ["linked"],
+                    "references": [target.object_id]
+                }),
+            ))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let source: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = test_app
+            .router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{}/referrers",
+                target.object_id
+            )))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: ReferrersResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.object_id, target.object_id);
+        assert_eq!(body.objects.len(), 1);
+        assert_eq!(body.objects[0].object_id, source.object_id);
+        assert_eq!(body.objects[0].object_type, "insight");
+        assert_eq!(body.objects[0].mime_type, "text/plain");
+        assert_eq!(body.objects[0].payload_size, 6);
     }
 
     #[tokio::test]

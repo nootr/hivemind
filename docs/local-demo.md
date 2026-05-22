@@ -5,6 +5,7 @@ Run a single local HIVEMIND node and exercise the first shared-memory flow:
 1. publish a memory object
 2. retrieve it by object ID
 3. find it by exact tag
+4. find objects that reference it
 
 ## Start a node
 
@@ -79,6 +80,18 @@ curl -sS \
 ```
 
 The response contains object summaries only, not payload bytes.
+
+## Find referrers
+
+To find local objects that reference another object:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  "http://127.0.0.1:7747/v1/objects/${OBJECT_ID}/referrers"
+```
+
+The response contains object summaries for local backlinks only.
 
 ## Smoke test
 

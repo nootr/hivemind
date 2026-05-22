@@ -7,7 +7,7 @@ mod token;
 
 pub use api::{
     app, ApiConfig, ApiError, AppState, GetObjectResponse, ObjectSummary, PublishObjectRequest,
-    PublishObjectResponse, SystemClock, TagLookupResponse,
+    PublishObjectResponse, ReferrersResponse, SystemClock, TagLookupResponse,
 };
 pub use config::{ApiFileConfig, ConfigError, DataConfig, IdentityConfig, NodeConfig};
 pub use dev_identity::DevIdentity;
