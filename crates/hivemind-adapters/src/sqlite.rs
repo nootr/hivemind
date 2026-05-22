@@ -134,6 +134,10 @@ impl SqliteMetadataStore {
             "DELETE FROM tags WHERE object_id = ?1",
             params![envelope.object_id.to_string()],
         )?;
+        tx.execute(
+            "DELETE FROM object_references WHERE source_object_id = ?1",
+            params![envelope.object_id.to_string()],
+        )?;
 
         for chunk in chunks {
             tx.execute(
@@ -169,6 +173,20 @@ impl SqliteMetadataStore {
             tx.execute(
                 "INSERT OR IGNORE INTO tags (tag, object_id) VALUES (?1, ?2)",
                 params![tag, envelope.object_id.to_string()],
+            )?;
+        }
+
+        for (position, target_object_id) in envelope.body.references.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO object_references (source_object_id, target_object_id, position)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(source_object_id, position) DO UPDATE SET
+                    target_object_id = excluded.target_object_id",
+                params![
+                    envelope.object_id.to_string(),
+                    target_object_id.to_string(),
+                    position as i64,
+                ],
             )?;
         }
 
@@ -239,6 +257,22 @@ impl SqliteMetadataStore {
         let mut statement = connection
             .prepare("SELECT object_id FROM tags WHERE tag = ?1 ORDER BY object_id ASC")?;
         let rows = statement.query_map(params![tag], |row| {
+            parse_object_id(row.get::<_, String>(0)?)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(SqliteStoreError::Sqlite)
+    }
+
+    pub fn objects_referencing(&self, object_id: ObjectId) -> SqliteStoreResult<Vec<ObjectId>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| SqliteStoreError::LockPoisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT source_object_id FROM object_references
+             WHERE target_object_id = ?1 ORDER BY source_object_id ASC",
+        )?;
+        let rows = statement.query_map(params![object_id.to_string()], |row| {
             parse_object_id(row.get::<_, String>(0)?)
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -405,6 +439,14 @@ CREATE TABLE IF NOT EXISTS tags (
   FOREIGN KEY (object_id) REFERENCES objects(object_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS object_references (
+  source_object_id TEXT NOT NULL,
+  target_object_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (source_object_id, position),
+  FOREIGN KEY (source_object_id) REFERENCES objects(object_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_object_chunks_object_position
   ON object_chunks (object_id, position);
 
@@ -413,6 +455,12 @@ CREATE INDEX IF NOT EXISTS idx_object_chunks_chunk
 
 CREATE INDEX IF NOT EXISTS idx_tags_tag
   ON tags (tag);
+
+CREATE INDEX IF NOT EXISTS idx_object_references_source_position
+  ON object_references (source_object_id, position);
+
+CREATE INDEX IF NOT EXISTS idx_object_references_target
+  ON object_references (target_object_id);
 "#;
 
 #[cfg(test)]
@@ -421,13 +469,21 @@ mod tests {
     use hivemind_core::{AgentKeypair, ObjectBody};
 
     fn signed_envelope(payload: Vec<u8>, tags: Vec<String>) -> ObjectEnvelope {
+        signed_envelope_with_references(payload, tags, Vec::new())
+    }
+
+    fn signed_envelope_with_references(
+        payload: Vec<u8>,
+        tags: Vec<String>,
+        references: Vec<ObjectId>,
+    ) -> ObjectEnvelope {
         let keypair = AgentKeypair::from_seed([3_u8; 32]);
         let prepared = ObjectBody::prepare(
             ObjectKind::Fact,
             keypair.agent_id(),
             1_700_000_000_000,
             tags,
-            Vec::new(),
+            references,
             "text/plain",
             payload,
         )
@@ -532,6 +588,55 @@ mod tests {
             .unwrap();
         assert_eq!(metadata.object_path, "two");
         assert_eq!(metadata.received_at_ms, 2);
+    }
+
+    #[test]
+    fn records_object_references_and_backlinks() {
+        let store = SqliteMetadataStore::in_memory().unwrap();
+        let target = signed_envelope(b"target".to_vec(), Vec::new());
+        let source =
+            signed_envelope_with_references(b"source".to_vec(), Vec::new(), vec![target.object_id]);
+
+        store.record_object(&target, "target", &[], 1).unwrap();
+        store.record_object(&source, "source", &[], 2).unwrap();
+
+        assert_eq!(
+            store.objects_referencing(target.object_id).unwrap(),
+            vec![source.object_id]
+        );
+    }
+
+    #[test]
+    fn records_references_to_unknown_objects() {
+        let store = SqliteMetadataStore::in_memory().unwrap();
+        let unknown = "00".repeat(32).parse().unwrap();
+        let source = signed_envelope_with_references(b"source".to_vec(), Vec::new(), vec![unknown]);
+
+        store.record_object(&source, "source", &[], 1).unwrap();
+
+        assert_eq!(
+            store.objects_referencing(unknown).unwrap(),
+            vec![source.object_id]
+        );
+    }
+
+    #[test]
+    fn repeated_references_count_as_one_backlink() {
+        let store = SqliteMetadataStore::in_memory().unwrap();
+        let target = signed_envelope(b"target".to_vec(), Vec::new());
+        let source = signed_envelope_with_references(
+            b"source".to_vec(),
+            Vec::new(),
+            vec![target.object_id, target.object_id],
+        );
+
+        store.record_object(&target, "target", &[], 1).unwrap();
+        store.record_object(&source, "source", &[], 2).unwrap();
+
+        assert_eq!(
+            store.objects_referencing(target.object_id).unwrap(),
+            vec![source.object_id]
+        );
     }
 
     #[test]
