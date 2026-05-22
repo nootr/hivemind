@@ -11,6 +11,6 @@ mod object;
 pub use error::{Error, Result};
 pub use ids::{AgentId, ChunkId, ObjectId};
 pub use object::{
-    chunk_payload, verify_chunk, AgentKeypair, ChunkRef, ObjectBody, ObjectEnvelope, ObjectKind,
-    Payload, PayloadEncoding, INLINE_OBJECT_THRESHOLD,
+    chunk_payload, verify_chunk, AgentKeypair, ChunkRef, ChunkedPayload, InlinePayload, ObjectBody,
+    ObjectEnvelope, ObjectKind, Payload, INLINE_OBJECT_THRESHOLD,
 };

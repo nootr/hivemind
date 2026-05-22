@@ -11,6 +11,9 @@ pub enum Error {
     #[error("invalid object signature")]
     InvalidObjectSignature,
 
+    #[error("invalid object body")]
+    InvalidObjectBody,
+
     #[error("invalid chunk id")]
     InvalidChunkId,
 

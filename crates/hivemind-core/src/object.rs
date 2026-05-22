@@ -49,20 +49,26 @@ pub enum ObjectKind {
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq)]
 pub enum Payload {
     #[n(0)]
-    Inline(#[n(0)] PayloadEncoding),
+    Inline(#[n(0)] InlinePayload),
     #[n(1)]
-    Chunked(#[n(0)] PayloadEncoding),
+    Chunked(#[n(0)] ChunkedPayload),
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq)]
-pub struct PayloadEncoding {
+pub struct InlinePayload {
+    #[n(0)]
+    pub mime_type: String,
+    #[n(1)]
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Decode, Encode, Eq, PartialEq)]
+pub struct ChunkedPayload {
     #[n(0)]
     pub mime_type: String,
     #[n(1)]
     pub total_size: u64,
     #[n(2)]
-    pub bytes: Vec<u8>,
-    #[n(3)]
     pub chunks: Vec<ChunkRef>,
 }
 
@@ -111,6 +117,7 @@ impl AgentKeypair {
         if body.author != self.agent_id() {
             return Err(Error::InvalidObjectSignature);
         }
+        body.validate()?;
 
         let canonical_body = canonical_body_bytes(&body)?;
         let object_id = ObjectId::from_canonical_body(&canonical_body);
@@ -142,23 +149,20 @@ impl ObjectBody {
 
         let mime_type = mime_type.into();
         let payload = if payload_bytes.len() <= INLINE_OBJECT_THRESHOLD {
-            Payload::Inline(PayloadEncoding {
+            Payload::Inline(InlinePayload {
                 mime_type,
-                total_size: payload_bytes.len() as u64,
                 bytes: payload_bytes,
-                chunks: Vec::new(),
             })
         } else {
             let (_chunks, chunk_refs) = chunk_payload(&payload_bytes, DEFAULT_CHUNK_SIZE);
-            Payload::Chunked(PayloadEncoding {
+            Payload::Chunked(ChunkedPayload {
                 mime_type,
                 total_size: payload_bytes.len() as u64,
-                bytes: Vec::new(),
                 chunks: chunk_refs,
             })
         };
 
-        Ok(Self {
+        let body = Self {
             schema_version: 1,
             kind,
             author,
@@ -166,16 +170,55 @@ impl ObjectBody {
             tags,
             references,
             payload,
-        })
+        };
+        body.validate()?;
+        Ok(body)
     }
 
     pub fn object_id(&self) -> Result<ObjectId> {
+        self.validate()?;
         Ok(ObjectId::from_canonical_body(&canonical_body_bytes(self)?))
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != 1 {
+            return Err(Error::InvalidObjectBody);
+        }
+
+        match &self.payload {
+            Payload::Inline(payload) => {
+                if payload.bytes.len() > INLINE_OBJECT_THRESHOLD {
+                    return Err(Error::InvalidObjectBody);
+                }
+            }
+            Payload::Chunked(payload) => {
+                if payload.total_size == 0 || payload.chunks.is_empty() {
+                    return Err(Error::InvalidObjectBody);
+                }
+
+                let mut total_size = 0_u64;
+                for (expected_index, chunk) in payload.chunks.iter().enumerate() {
+                    if chunk.index != expected_index as u32 || chunk.size == 0 {
+                        return Err(Error::InvalidObjectBody);
+                    }
+                    total_size += u64::from(chunk.size);
+                }
+
+                if total_size != payload.total_size || total_size <= INLINE_OBJECT_THRESHOLD as u64
+                {
+                    return Err(Error::InvalidObjectBody);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
 impl ObjectEnvelope {
     pub fn verify(&self) -> Result<()> {
+        self.body.validate()?;
+
         let canonical_body = canonical_body_bytes(&self.body)?;
         let expected_object_id = ObjectId::from_canonical_body(&canonical_body);
         if self.object_id != expected_object_id {
@@ -320,13 +363,31 @@ mod tests {
             vec![1_u8; INLINE_OBJECT_THRESHOLD + 1],
         );
         match body.payload {
-            Payload::Chunked(encoding) => {
-                assert!(encoding.bytes.is_empty());
-                assert_eq!(encoding.total_size, (INLINE_OBJECT_THRESHOLD + 1) as u64);
-                assert_eq!(encoding.chunks.len(), 1);
+            Payload::Chunked(payload) => {
+                assert_eq!(payload.total_size, (INLINE_OBJECT_THRESHOLD + 1) as u64);
+                assert_eq!(payload.chunks.len(), 1);
             }
             Payload::Inline(_) => panic!("expected chunked payload"),
         }
+    }
+
+    #[test]
+    fn invalid_chunked_payload_is_rejected() {
+        let body = ObjectBody {
+            schema_version: 1,
+            kind: ObjectKind::Fact,
+            author: keypair().agent_id(),
+            created_at_ms: 1_700_000_000_000,
+            tags: Vec::new(),
+            references: Vec::new(),
+            payload: Payload::Chunked(ChunkedPayload {
+                mime_type: "text/plain".to_owned(),
+                total_size: 999,
+                chunks: Vec::new(),
+            }),
+        };
+
+        assert_eq!(body.validate(), Err(Error::InvalidObjectBody));
     }
 
     #[test]
