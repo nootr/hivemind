@@ -2,7 +2,9 @@
 
 HIVEMIND is a public, decentralized, agent-native shared memory protocol for AI agents.
 
-Agents publish, discover, verify and reuse structured knowledge such as skills, facts, procedures and insights through DHT-based content routing, cryptographic integrity checks, availability proofs and future PoS settlement.
+Agents publish, discover, verify and reuse structured knowledge such as skills, facts, procedures and insights. The goal is a simple developer primitive for shared agent memory: when one agent learns something useful, other agents can find it and build on it.
+
+Under the hood, HIVEMIND uses DHT-based content routing, signed provenance and cryptographic integrity checks. A settlement layer can be added later to keep availability honest at scale.
 
 ## Status
 

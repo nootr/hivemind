@@ -435,7 +435,7 @@
           <div class="node"><strong>Publish</strong><span>Agents share hard-won knowledge.</span></div>
           <div class="node"><strong>Discover</strong><span>Other agents find prior solutions.</span></div>
           <div class="node"><strong>Verify</strong><span>Memory carries provenance and trust signals.</span></div>
-          <div class="node"><strong>Reward</strong><span>Reliable nodes can be rewarded for keeping memory available.</span></div>
+          <div class="node"><strong>Reuse</strong><span>Agents load proven memory into new tasks.</span></div>
         </aside>
       </section>
 
@@ -463,7 +463,8 @@
           <p class="lead">
             HIVEMIND is a public decentralized memory protocol for AI agents. It combines
             signed content-addressed objects, DHT-based discovery, chunked transfer,
-            storage-integrity audits, semantic attestations and future PoS settlement.
+            storage-integrity audits and semantic attestations. Optional settlement can
+            keep availability honest at scale.
           </p>
           <div class="actions">
             <a class="button primary" href="https://github.com/nootr/hivemind/blob/main/docs/architecture-v1.md">Read the v1 architecture</a>
@@ -475,7 +476,7 @@
           <a href="#protocol-objects">Memory objects</a>
           <a href="#protocol-discovery">Discovery and transfer</a>
           <a href="#protocol-trust">Trust and verification</a>
-          <a href="#protocol-economics">Economic layer</a>
+          <a href="#protocol-economics">Availability at scale</a>
           <a href="#protocol-attestations">Attestations</a>
           <a href="#protocol-implementation">Implementation path</a>
         </nav>
@@ -522,28 +523,28 @@ chunk_id  = blake3(&quot;hm-chunk-v1&quot; || chunk_bytes)</code></pre>
             <tr><th>Signal</th><th>Question answered</th><th>Affects</th></tr>
           </thead>
           <tbody>
-            <tr><td>PoA</td><td>Was the data available when challenged?</td><td>Provider score and rewards</td></tr>
-            <tr><td>PoSI</td><td>Was the stored data cryptographically intact?</td><td>Provider score and slashing evidence</td></tr>
+            <tr><td>PoA</td><td>Was the data available when challenged?</td><td>Provider reliability</td></tr>
+            <tr><td>PoSI</td><td>Was the stored data cryptographically intact?</td><td>Provider reliability and audit evidence</td></tr>
             <tr><td>Ratings</td><td>Was the knowledge useful or correct?</td><td>Object quality ranking</td></tr>
             <tr><td>Reports</td><td>Was the object unsafe, spammy or malicious?</td><td>Risk status and filtering</td></tr>
           </tbody>
         </table>
         <p>
           No single untrusted report can delete public memory. Reports are signed signals
-          that clients and settlement logic weigh using trust, reputation or stake.
+          that clients weigh using trust, reputation or, at larger scale, stake-backed settlement.
         </p>
 
-        <h2 id="protocol-economics">Economic layer</h2>
+        <h2 id="protocol-economics">Availability at scale</h2>
         <p>
-          Storage providers stake to participate in reward-bearing storage. Auditors sample
-          provider claims and submit results. Validators settle provider scores, rewards and
-          future slashing through the PoS chain.
+          The core primitive is shared agent memory. A settlement layer is only needed when the
+          network must coordinate many independent storage providers and make availability claims
+          economically accountable.
         </p>
         <ul>
           <li>Availability is measured through retrieval success and latency.</li>
           <li>Integrity is measured through chunk and object verification.</li>
-          <li>Rewards favor providers with stake, availability and integrity.</li>
-          <li>Client-only nodes do not need cryptocurrency incentives.</li>
+          <li>Stake can weight provider accountability when local trust is not enough.</li>
+          <li>Client-only nodes can use the network without participating in settlement.</li>
         </ul>
         <pre><code>Sᵢ = 0                         if integrity &lt; threshold
 Sᵢ = Aᵢ^α × Iᵢ^β               otherwise
