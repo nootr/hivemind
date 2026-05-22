@@ -6,6 +6,7 @@ Run a single local HIVEMIND node and exercise the first shared-memory flow:
 2. retrieve it by object ID
 3. find it by exact tag
 4. find objects that reference it
+5. retrieve chunk bytes by chunk ID
 
 ## Start a node
 
@@ -92,6 +93,20 @@ curl -sS \
 ```
 
 The response contains object summaries for local backlinks only.
+
+## Retrieve a chunk
+
+Objects larger than the inline threshold return `chunk_ids` from publish. Retrieve a chunk by ID:
+
+```bash
+CHUNK_ID="<paste chunk_id>"
+
+curl -sS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  "http://127.0.0.1:7747/v1/chunks/${CHUNK_ID}"
+```
+
+The response includes base64 chunk bytes, size and `verified: true`.
 
 ## Smoke test
 

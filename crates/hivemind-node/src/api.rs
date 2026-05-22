@@ -13,7 +13,7 @@ use hivemind_adapters::{
     sqlite::{SqliteMetadataStore, StoredChunk},
 };
 use hivemind_app::{AppResult, ClockPort, IdentityPort, PublishObject, PublishObjectInput};
-use hivemind_core::{ObjectId, ObjectKind, Payload};
+use hivemind_core::{ChunkId, ObjectId, ObjectKind, Payload};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -62,6 +62,14 @@ pub struct GetObjectResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct GetChunkResponse {
+    pub chunk_id: String,
+    pub size: u64,
+    pub bytes_base64: String,
+    pub verified: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct TagLookupResponse {
     pub tag: String,
     pub objects: Vec<ObjectSummary>,
@@ -95,8 +103,14 @@ pub enum ApiError {
     #[error("invalid object id")]
     InvalidObjectId,
 
+    #[error("invalid chunk id")]
+    InvalidChunkId,
+
     #[error("object not found")]
     ObjectNotFound,
+
+    #[error("chunk not found")]
+    ChunkNotFound,
 
     #[error("invalid base64 payload")]
     InvalidBase64,
@@ -112,10 +126,11 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
-            ApiError::InvalidObjectType | ApiError::InvalidObjectId | ApiError::InvalidBase64 => {
-                StatusCode::BAD_REQUEST
-            }
-            ApiError::ObjectNotFound => StatusCode::NOT_FOUND,
+            ApiError::InvalidObjectType
+            | ApiError::InvalidObjectId
+            | ApiError::InvalidChunkId
+            | ApiError::InvalidBase64 => StatusCode::BAD_REQUEST,
+            ApiError::ObjectNotFound | ApiError::ChunkNotFound => StatusCode::NOT_FOUND,
             ApiError::App(_) | ApiError::Metadata(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, self.to_string()).into_response()
@@ -127,6 +142,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/objects", post(publish_object))
         .route("/v1/objects/{object_id}", get(get_object))
         .route("/v1/objects/{object_id}/referrers", get(get_referrers))
+        .route("/v1/chunks/{chunk_id}", get(get_chunk))
         .route("/v1/tags/{tag}", get(get_tag))
         .route_layer(middleware::from_fn_with_state(
             state.config.clone(),
@@ -255,6 +271,33 @@ async fn get_object(
             .map(|object_id| object_id.to_string())
             .collect(),
         payload_base64: STANDARD.encode(payload_bytes),
+        verified: true,
+    }))
+}
+
+async fn get_chunk(
+    State(state): State<AppState>,
+    Path(chunk_id): Path<String>,
+) -> Result<Json<GetChunkResponse>, ApiError> {
+    let chunk_id = chunk_id
+        .parse::<ChunkId>()
+        .map_err(|_| ApiError::InvalidChunkId)?;
+    let bytes = state
+        .content_store
+        .get_chunk(chunk_id)
+        .await
+        .map_err(|err| match err {
+            hivemind_adapters::fs::FsStoreError::Io(io_err)
+                if io_err.kind() == std::io::ErrorKind::NotFound =>
+            {
+                ApiError::ChunkNotFound
+            }
+            other => ApiError::App(other.to_string()),
+        })?;
+    Ok(Json(GetChunkResponse {
+        chunk_id: chunk_id.to_string(),
+        size: bytes.len() as u64,
+        bytes_base64: STANDARD.encode(bytes),
         verified: true,
     }))
 }
@@ -892,6 +935,87 @@ mod tests {
         assert_eq!(body.mime_type, "application/octet-stream");
         assert_eq!(STANDARD.decode(body.payload_base64).unwrap(), payload);
         assert!(body.verified);
+    }
+
+    #[tokio::test]
+    async fn get_chunk_roundtrips_bytes() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let test_app = test_app(&tempdir);
+        let payload = vec![7_u8; hivemind_core::INLINE_OBJECT_THRESHOLD + 1];
+        let response = test_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "application/octet-stream",
+                    "payload_base64": STANDARD.encode(&payload),
+                    "tags": []
+                }),
+            ))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+        let chunk_id = published.chunk_ids[0].clone();
+
+        let response = test_app
+            .router
+            .oneshot(authorized_get_request(&format!("/v1/chunks/{chunk_id}")))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: GetChunkResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.chunk_id, chunk_id);
+        assert_eq!(body.size, payload.len() as u64);
+        assert_eq!(STANDARD.decode(body.bytes_base64).unwrap(), payload);
+        assert!(body.verified);
+    }
+
+    #[tokio::test]
+    async fn get_chunk_requires_auth() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/chunks/not-an-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_chunk_invalid_chunk_id_returns_bad_request() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(authorized_get_request("/v1/chunks/not-an-id"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_missing_chunk_returns_not_found() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let missing_id = "00".repeat(32);
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(authorized_get_request(&format!("/v1/chunks/{missing_id}")))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

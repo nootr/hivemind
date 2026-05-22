@@ -121,6 +121,29 @@ CHILD_PUBLISH_RESPONSE="$(curl --silent --fail \
 CHILD_OBJECT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["object_id"])' <<<"${CHILD_PUBLISH_RESPONSE}")"
 log "published child object: ${CHILD_OBJECT_ID}"
 
+CHUNKED_PUBLISH_BODY="$(python3 - <<'PY'
+import base64
+import json
+payload = bytes([9]) * (16 * 1024 + 1)
+print(json.dumps({
+    "object_type": "fact",
+    "mime_type": "application/octet-stream",
+    "payload_base64": base64.b64encode(payload).decode("ascii"),
+    "tags": ["chunked"],
+}))
+PY
+)"
+
+log "publishing chunked object"
+CHUNKED_PUBLISH_RESPONSE="$(curl --silent --fail \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "${CHUNKED_PUBLISH_BODY}" \
+  http://127.0.0.1:17747/v1/objects)"
+
+CHUNK_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["chunk_ids"][0])' <<<"${CHUNKED_PUBLISH_RESPONSE}")"
+log "published chunk: ${CHUNK_ID}"
+
 log "retrieving parent object by ID"
 GET_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${TOKEN}" \
@@ -140,6 +163,11 @@ log "looking up referrers for parent"
 REFERRERS_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${TOKEN}" \
   "http://127.0.0.1:17747/v1/objects/${PARENT_OBJECT_ID}/referrers")"
+
+log "retrieving chunk by ID"
+CHUNK_RESPONSE="$(curl --silent --fail \
+  -H "Authorization: Bearer ${TOKEN}" \
+  "http://127.0.0.1:17747/v1/chunks/${CHUNK_ID}")"
 
 GET_RESPONSE="${GET_RESPONSE}" python3 - "${PARENT_OBJECT_ID}" <<'PY'
 import base64
@@ -196,5 +224,18 @@ assert body["objects"][0]["object_id"] == child_id
 assert body["objects"][0]["object_type"] == "insight"
 PY
 
-log "verified retrieved payloads, tag lookup and reference backlink response"
-echo "local demo ok: ${PARENT_OBJECT_ID} <- ${CHILD_OBJECT_ID}"
+CHUNK_RESPONSE="${CHUNK_RESPONSE}" python3 - "${CHUNK_ID}" <<'PY'
+import base64
+import json
+import os
+import sys
+chunk_id = sys.argv[1]
+body = json.loads(os.environ["CHUNK_RESPONSE"])
+assert body["chunk_id"] == chunk_id
+assert body["size"] == 16 * 1024 + 1
+assert base64.b64decode(body["bytes_base64"]) == bytes([9]) * (16 * 1024 + 1)
+assert body["verified"] is True
+PY
+
+log "verified retrieved payloads, tag lookup, backlink response and chunk retrieval"
+echo "local demo ok: ${PARENT_OBJECT_ID} <- ${CHILD_OBJECT_ID}; chunk ${CHUNK_ID}"
