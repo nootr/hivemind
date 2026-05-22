@@ -11,15 +11,17 @@ repository = "https://github.com/nootr/hivemind"
 blake3 = "1.5"
 ed25519-dalek = "2.1"
 hex = "0.4"
+getrandom = "0.2"
 async-trait = "0.1"
 futures = "0.3"
 minicbor = { version = "0.25", features = ["alloc", "derive"] }
 thiserror = "1.0"
-tokio = { version = "1.38", features = ["fs", "io-util", "macros", "rt"] }
+tokio = { version = "1.38", features = ["fs", "io-util", "macros", "rt", "rt-multi-thread"] }
 tempfile = "3.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 axum = "0.8.9"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 tower = "0.5"
