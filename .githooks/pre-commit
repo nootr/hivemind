@@ -10,4 +10,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 echo "==> cargo test --workspace"
 cargo test --workspace
 
+shopt -s nullglob
+for script in ./scripts/*.sh; do
+  echo "==> ${script}"
+  "${script}"
+done
+shopt -u nullglob
+
 echo "pre-commit checks passed"
