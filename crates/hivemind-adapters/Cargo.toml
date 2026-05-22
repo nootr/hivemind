@@ -10,6 +10,7 @@ async-trait.workspace = true
 hivemind-app = { path = "../hivemind-app" }
 hivemind-core = { path = "../hivemind-core" }
 minicbor.workspace = true
+rusqlite.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
