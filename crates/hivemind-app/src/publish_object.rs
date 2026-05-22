@@ -3,8 +3,8 @@ use hivemind_core::{ChunkId, ObjectBody, ObjectId, ObjectKind, Payload};
 
 pub struct PublishObject<'a, I, C, O, S>
 where
-    I: IdentityPort,
-    C: ClockPort,
+    I: IdentityPort + ?Sized,
+    C: ClockPort + ?Sized,
     O: ObjectStorePort,
     S: ChunkStorePort,
 {
@@ -31,8 +31,8 @@ pub struct PublishObjectOutput {
 
 impl<'a, I, C, O, S> PublishObject<'a, I, C, O, S>
 where
-    I: IdentityPort,
-    C: ClockPort,
+    I: IdentityPort + ?Sized,
+    C: ClockPort + ?Sized,
     O: ObjectStorePort,
     S: ChunkStorePort,
 {
