@@ -94,6 +94,12 @@ pub struct ObjectEnvelope {
     pub author_signature: [u8; 64],
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedObject {
+    pub body: ObjectBody,
+    pub chunks: Vec<Vec<u8>>,
+}
+
 pub struct AgentKeypair {
     signing_key: SigningKey,
 }
@@ -134,7 +140,7 @@ impl AgentKeypair {
 }
 
 impl ObjectBody {
-    pub fn new(
+    pub fn prepare(
         kind: ObjectKind,
         author: AgentId,
         created_at_ms: u64,
@@ -142,24 +148,30 @@ impl ObjectBody {
         references: Vec<ObjectId>,
         mime_type: impl Into<String>,
         payload_bytes: Vec<u8>,
-    ) -> Result<Self> {
+    ) -> Result<PreparedObject> {
         if payload_bytes.len() > MAX_PAYLOAD_SIZE {
             return Err(Error::PayloadTooLarge);
         }
 
         let mime_type = mime_type.into();
-        let payload = if payload_bytes.len() <= INLINE_OBJECT_THRESHOLD {
-            Payload::Inline(InlinePayload {
-                mime_type,
-                bytes: payload_bytes,
-            })
+        let (payload, chunks) = if payload_bytes.len() <= INLINE_OBJECT_THRESHOLD {
+            (
+                Payload::Inline(InlinePayload {
+                    mime_type,
+                    bytes: payload_bytes,
+                }),
+                Vec::new(),
+            )
         } else {
-            let (_chunks, chunk_refs) = chunk_payload(&payload_bytes, DEFAULT_CHUNK_SIZE);
-            Payload::Chunked(ChunkedPayload {
-                mime_type,
-                total_size: payload_bytes.len() as u64,
-                chunks: chunk_refs,
-            })
+            let (chunks, chunk_refs) = chunk_payload(&payload_bytes, DEFAULT_CHUNK_SIZE);
+            (
+                Payload::Chunked(ChunkedPayload {
+                    mime_type,
+                    total_size: payload_bytes.len() as u64,
+                    chunks: chunk_refs,
+                }),
+                chunks,
+            )
         };
 
         let body = Self {
@@ -172,7 +184,7 @@ impl ObjectBody {
             payload,
         };
         body.validate()?;
-        Ok(body)
+        Ok(PreparedObject { body, chunks })
     }
 
     pub fn object_id(&self) -> Result<ObjectId> {
@@ -290,7 +302,7 @@ mod tests {
     }
 
     fn body_with_payload(author: AgentId, payload: Vec<u8>) -> ObjectBody {
-        ObjectBody::new(
+        ObjectBody::prepare(
             ObjectKind::Fact,
             author,
             1_700_000_000_000,
@@ -300,6 +312,7 @@ mod tests {
             payload,
         )
         .unwrap()
+        .body
     }
 
     #[test]
@@ -358,14 +371,26 @@ mod tests {
 
     #[test]
     fn payload_above_inline_threshold_becomes_chunked_refs() {
-        let body = body_with_payload(
+        let prepared = ObjectBody::prepare(
+            ObjectKind::Fact,
             keypair().agent_id(),
+            1_700_000_000_000,
+            Vec::new(),
+            Vec::new(),
+            "text/plain",
             vec![1_u8; INLINE_OBJECT_THRESHOLD + 1],
-        );
-        match body.payload {
+        )
+        .unwrap();
+
+        match prepared.body.payload {
             Payload::Chunked(payload) => {
                 assert_eq!(payload.total_size, (INLINE_OBJECT_THRESHOLD + 1) as u64);
                 assert_eq!(payload.chunks.len(), 1);
+                assert_eq!(prepared.chunks.len(), 1);
+                assert_eq!(
+                    payload.chunks[0].chunk_id,
+                    ChunkId::from_chunk_bytes(&prepared.chunks[0])
+                );
             }
             Payload::Inline(_) => panic!("expected chunked payload"),
         }
