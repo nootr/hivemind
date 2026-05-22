@@ -8,6 +8,7 @@ Run a single local HIVEMIND node and exercise the first shared-memory flow:
 4. find it by exact tag
 5. find objects that reference it
 6. retrieve chunk bytes by chunk ID
+7. import transferred chunks and envelopes
 
 ## Start a node
 
@@ -120,6 +121,31 @@ curl -sS \
 ```
 
 The response includes base64 chunk bytes, size and `verified: true`.
+
+## Import transferred content
+
+Chunks are imported by content ID. The node verifies that the bytes match the chunk ID before storing them:
+
+```bash
+curl -sS \
+  -X PUT \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"bytes_base64\":\"<base64 chunk bytes>\"}" \
+  "http://127.0.0.1:7747/v1/chunks/${CHUNK_ID}"
+```
+
+Signed object envelopes are imported separately:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"envelope_cbor_base64\":\"<base64 envelope cbor>\"}" \
+  http://127.0.0.1:7747/v1/objects/envelope
+```
+
+For chunked objects, import required chunks before importing the envelope. Envelope import verifies the signature and records local metadata/tag/reference indexes.
 
 ## Smoke test
 

@@ -7,7 +7,8 @@ mod token;
 
 pub use api::{
     app, ApiConfig, ApiError, AppState, GetChunkResponse, GetObjectEnvelopeResponse,
-    GetObjectResponse, ObjectSummary, PublishObjectRequest, PublishObjectResponse,
+    GetObjectResponse, ImportObjectEnvelopeRequest, ImportObjectEnvelopeResponse, ObjectSummary,
+    PublishObjectRequest, PublishObjectResponse, PutChunkRequest, PutChunkResponse,
     ReferrersResponse, SystemClock, TagLookupResponse,
 };
 pub use config::{ApiFileConfig, ConfigError, DataConfig, IdentityConfig, NodeConfig};
