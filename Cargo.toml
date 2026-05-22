@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/hivemind-core"]
+members = ["crates/hivemind-app", "crates/hivemind-core"]
 resolver = "2"
 
 [workspace.package]
@@ -11,5 +11,7 @@ repository = "https://github.com/nootr/hivemind"
 blake3 = "1.5"
 ed25519-dalek = "2.1"
 hex = "0.4"
+async-trait = "0.1"
+futures = "0.3"
 minicbor = { version = "0.25", features = ["alloc", "derive"] }
 thiserror = "1.0"
