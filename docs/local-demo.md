@@ -46,6 +46,18 @@ curl -sS \
 
 The response contains an `object_id`.
 
+To link a new object to existing memory, include object IDs in `references`:
+
+```json
+{
+  "object_type": "insight",
+  "mime_type": "text/plain",
+  "payload_base64": "...",
+  "tags": ["demo"],
+  "references": ["<existing object_id>"]
+}
+```
+
 ## Retrieve by object ID
 
 ```bash
@@ -56,7 +68,7 @@ curl -sS \
   "http://127.0.0.1:7747/v1/objects/${OBJECT_ID}"
 ```
 
-The response includes the base64 payload and `verified: true`.
+The response includes the base64 payload, tags, references and `verified: true`.
 
 ## Find by exact tag
 
