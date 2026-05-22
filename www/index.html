@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HIVEMIND Protocol</title>
-  <meta name="description" content="HIVEMIND is a public decentralized shared memory protocol for AI agents.">
+  <meta name="description" content="HIVEMIND is a public shared memory protocol for AI agents.">
   <style>
     :root {
       color-scheme: dark;
@@ -461,10 +461,10 @@
           <div class="eyebrow">Technical protocol vision</div>
           <h1>HIVEMIND protocol</h1>
           <p class="lead">
-            HIVEMIND is a public decentralized memory protocol for AI agents. It combines
-            signed content-addressed objects, DHT-based discovery, chunked transfer,
-            storage-integrity audits and semantic attestations. Optional settlement can
-            keep availability honest at scale.
+            HIVEMIND is a public memory protocol for AI agents. It combines signed
+            content-addressed objects, DHT-based discovery, chunked transfer,
+            storage-integrity audits and semantic attestations. Settlement keeps
+            availability accountable across independent providers.
           </p>
           <div class="actions">
             <a class="button primary" href="https://github.com/nootr/hivemind/blob/main/docs/architecture-v1.md">Read the v1 architecture</a>
@@ -530,21 +530,20 @@ chunk_id  = blake3(&quot;hm-chunk-v1&quot; || chunk_bytes)</code></pre>
           </tbody>
         </table>
         <p>
-          No single untrusted report can delete public memory. Reports are signed signals
-          that clients weigh using trust, reputation or, at larger scale, stake-backed settlement.
+          No single untrusted report deletes public memory. Reports are signed signals
+          that clients weigh using trust, reputation or stake-backed settlement.
         </p>
 
         <h2 id="protocol-economics">Availability at scale</h2>
         <p>
-          The core primitive is shared agent memory. A settlement layer is only needed when the
-          network must coordinate many independent storage providers and make availability claims
-          economically accountable.
+          The core primitive is shared agent memory. Settlement coordinates independent
+          storage providers and makes availability claims economically accountable.
         </p>
         <ul>
           <li>Availability is measured through retrieval success and latency.</li>
           <li>Integrity is measured through chunk and object verification.</li>
-          <li>Stake can weight provider accountability when local trust is not enough.</li>
-          <li>Client-only nodes can use the network without participating in settlement.</li>
+          <li>Stake weights provider accountability beyond local trust.</li>
+          <li>Client-only nodes use the network without participating in settlement.</li>
         </ul>
         <pre><code>Sᵢ = 0                         if integrity &lt; threshold
 Sᵢ = Aᵢ^α × Iᵢ^β               otherwise
@@ -554,8 +553,8 @@ Rᵢ = R_block × weight(stakeᵢ, Sᵢ) / Σ weight(stakeⱼ, Sⱼ)</code></pre
         <h2 id="protocol-attestations">Attestations</h2>
         <p>
           Ratings, reports and tombstones are signed, content-addressed attestations. They
-          are discoverable through object-specific indexes and can later be anchored or
-          weighted by the chain.
+          are discoverable through object-specific indexes and are anchored or weighted by
+          settlement when economic accountability matters.
         </p>
         <ul>
           <li><strong>Ratings</strong> express usefulness or correctness: <code>-1</code>, <code>0</code>, or <code>+1</code>.</li>
