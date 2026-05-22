@@ -38,6 +38,8 @@ pub struct PublishObjectRequest {
     pub payload_base64: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -54,6 +56,7 @@ pub struct GetObjectResponse {
     pub created_at_ms: u64,
     pub mime_type: String,
     pub tags: Vec<String>,
+    pub references: Vec<String>,
     pub payload_base64: String,
     pub verified: bool,
 }
@@ -160,6 +163,7 @@ async fn publish_object(
     let payload = STANDARD
         .decode(request.payload_base64.as_bytes())
         .map_err(|_| ApiError::InvalidBase64)?;
+    let references = parse_object_ids(request.references)?;
 
     let publish = PublishObject::new(
         state.identity.as_ref(),
@@ -173,7 +177,7 @@ async fn publish_object(
             mime_type: request.mime_type,
             payload,
             tags: request.tags,
-            references: Vec::new(),
+            references,
         })
         .await
         .map_err(app_error)?;
@@ -237,6 +241,12 @@ async fn get_object(
         created_at_ms: envelope.body.created_at_ms,
         mime_type,
         tags: envelope.body.tags,
+        references: envelope
+            .body
+            .references
+            .into_iter()
+            .map(|object_id| object_id.to_string())
+            .collect(),
         payload_base64: STANDARD.encode(payload_bytes),
         verified: true,
     }))
@@ -328,6 +338,17 @@ fn object_kind_to_str(kind: ObjectKind) -> &'static str {
         ObjectKind::Tombstone => "tombstone",
         ObjectKind::Alias => "alias",
     }
+}
+
+fn parse_object_ids(values: Vec<String>) -> Result<Vec<ObjectId>, ApiError> {
+    values
+        .into_iter()
+        .map(|value| {
+            value
+                .parse::<ObjectId>()
+                .map_err(|_| ApiError::InvalidObjectId)
+        })
+        .collect()
 }
 
 fn parse_object_kind(value: &str) -> Result<ObjectKind, ApiError> {
@@ -627,7 +648,66 @@ mod tests {
         assert_eq!(body.created_at_ms, 1_700_000_000_000);
         assert_eq!(body.mime_type, "text/plain");
         assert_eq!(body.tags, vec!["rust"]);
+        assert!(body.references.is_empty());
         assert_eq!(STANDARD.decode(body.payload_base64).unwrap(), b"hello");
+        assert!(body.verified);
+    }
+
+    #[tokio::test]
+    async fn publish_object_accepts_references() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let test_app = test_app(&tempdir);
+        let response = test_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "text/plain",
+                    "payload_base64": STANDARD.encode(b"parent"),
+                    "tags": []
+                }),
+            ))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let parent: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = test_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "insight",
+                    "mime_type": "text/plain",
+                    "payload_base64": STANDARD.encode(b"child"),
+                    "tags": ["linked"],
+                    "references": [parent.object_id]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let child: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = test_app
+            .router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{}",
+                child.object_id
+            )))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: GetObjectResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.object_id, child.object_id);
+        assert_eq!(body.object_type, "insight");
+        assert_eq!(body.references, vec![parent.object_id]);
         assert!(body.verified);
     }
 
@@ -745,6 +825,27 @@ mod tests {
                     "mime_type": "text/plain",
                     "payload_base64": "not base64",
                     "tags": []
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn invalid_reference_returns_bad_request() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "text/plain",
+                    "payload_base64": STANDARD.encode(b"hello"),
+                    "tags": [],
+                    "references": ["not-an-object-id"]
                 }),
             ))
             .await

@@ -11,6 +11,10 @@ require_command() {
   fi
 }
 
+log() {
+  echo "==> $*"
+}
+
 require_command cargo
 require_command curl
 require_command python3
@@ -42,6 +46,8 @@ auth_token_file = "${DATA_DIR}/api.token"
 agent_key_path = "${DATA_DIR}/agent.ed25519"
 EOF
 
+log "created temporary node config at ${CONFIG}"
+log "starting hivemind-node on http://127.0.0.1:17747"
 cargo run --quiet -p hivemind-node -- --config "${CONFIG}" >"${LOG}" 2>&1 &
 PID="$!"
 
@@ -64,7 +70,10 @@ if [[ "${READY}" != "1" ]]; then
   cat "${LOG}" >&2
   exit 1
 fi
+log "node is healthy"
+
 TOKEN="$(tr -d '\n' < "${DATA_DIR}/api.token")"
+log "loaded bearer token from temporary data dir"
 
 PUBLISH_BODY="$(python3 - <<'PY'
 import base64
@@ -78,6 +87,7 @@ print(json.dumps({
 PY
 )"
 
+log "publishing fact object with tags: demo, rust"
 PUBLISH_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
@@ -85,11 +95,14 @@ PUBLISH_RESPONSE="$(curl --silent --fail \
   http://127.0.0.1:17747/v1/objects)"
 
 OBJECT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["object_id"])' <<<"${PUBLISH_RESPONSE}")"
+log "published object: ${OBJECT_ID}"
 
+log "retrieving object by ID"
 GET_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${TOKEN}" \
   "http://127.0.0.1:17747/v1/objects/${OBJECT_ID}")"
 
+log "looking up objects by exact tag: demo"
 TAG_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${TOKEN}" \
   http://127.0.0.1:17747/v1/tags/demo)"
@@ -120,4 +133,5 @@ assert body["objects"][0]["object_id"] == object_id
 assert body["objects"][0]["object_type"] == "fact"
 PY
 
+log "verified retrieved payload and tag lookup response"
 echo "local demo ok: ${OBJECT_ID}"
