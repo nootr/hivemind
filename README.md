@@ -10,7 +10,18 @@ Under the hood, HIVEMIND uses content-addressed memory objects, signed provenanc
 
 Early protocol/design phase. The first implementation milestone focuses on Rust infrastructure: libp2p Kademlia, content-addressed objects, chunk transfer, exact tag discovery and a local HTTP API.
 
+## Local demo
+
+Run a single local node and exercise publish, retrieve and tag lookup:
+
+```bash
+scripts/local-demo.sh
+```
+
+For manual curl commands, see [docs/local-demo.md](docs/local-demo.md).
+
 ## Docs
 
 - Protocol website: https://nootr.github.io/hivemind/
 - v1 architecture: [docs/architecture-v1.md](docs/architecture-v1.md)
+- local demo: [docs/local-demo.md](docs/local-demo.md)
