@@ -1,6 +1,7 @@
 use crate::{AgentId, ChunkId, Error, ObjectId, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use minicbor::{Decode, Encode};
+use std::num::NonZeroUsize;
 
 const OBJECT_SIGNATURE_DOMAIN: &[u8] = b"hm-object-signature-v1";
 
@@ -163,7 +164,7 @@ impl ObjectBody {
                 Vec::new(),
             )
         } else {
-            let (chunks, chunk_refs) = chunk_payload(&payload_bytes, DEFAULT_CHUNK_SIZE);
+            let (chunks, chunk_refs) = chunk_payload(&payload_bytes, default_chunk_size());
             (
                 Payload::Chunked(ChunkedPayload {
                     mime_type,
@@ -252,9 +253,9 @@ impl ObjectEnvelope {
     }
 }
 
-pub fn chunk_payload(payload: &[u8], chunk_size: usize) -> (Vec<Vec<u8>>, Vec<ChunkRef>) {
+pub fn chunk_payload(payload: &[u8], chunk_size: NonZeroUsize) -> (Vec<Vec<u8>>, Vec<ChunkRef>) {
     let chunks: Vec<Vec<u8>> = payload
-        .chunks(chunk_size)
+        .chunks(chunk_size.get())
         .map(std::borrow::ToOwned::to_owned)
         .collect();
     let refs = chunks
@@ -267,6 +268,10 @@ pub fn chunk_payload(payload: &[u8], chunk_size: usize) -> (Vec<Vec<u8>>, Vec<Ch
         })
         .collect();
     (chunks, refs)
+}
+
+fn default_chunk_size() -> NonZeroUsize {
+    NonZeroUsize::new(DEFAULT_CHUNK_SIZE).expect("DEFAULT_CHUNK_SIZE must be non-zero")
 }
 
 pub fn verify_chunk(chunk_id: ChunkId, bytes: &[u8]) -> Result<()> {
@@ -413,6 +418,17 @@ mod tests {
         };
 
         assert_eq!(body.validate(), Err(Error::InvalidObjectBody));
+    }
+
+    #[test]
+    fn chunk_payload_uses_nonzero_chunk_size() {
+        let chunk_size = NonZeroUsize::new(3).unwrap();
+        let (chunks, refs) = chunk_payload(b"abcdefg", chunk_size);
+        assert_eq!(
+            chunks,
+            vec![b"abc".to_vec(), b"def".to_vec(), b"g".to_vec()]
+        );
+        assert_eq!(refs.len(), 3);
     }
 
     #[test]
