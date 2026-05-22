@@ -58,6 +58,23 @@ pub struct GetObjectResponse {
     pub verified: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct TagLookupResponse {
+    pub tag: String,
+    pub objects: Vec<ObjectSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ObjectSummary {
+    pub object_id: String,
+    pub object_type: String,
+    pub author_agent_id: String,
+    pub created_at_ms: u64,
+    pub mime_type: String,
+    pub payload_size: u64,
+    pub chunk_count: u32,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("unauthorized")]
@@ -100,6 +117,7 @@ pub fn app(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/v1/objects", post(publish_object))
         .route("/v1/objects/{object_id}", get(get_object))
+        .route("/v1/tags/{tag}", get(get_tag))
         .route_layer(middleware::from_fn_with_state(
             state.config.clone(),
             require_bearer_auth,
@@ -222,6 +240,38 @@ async fn get_object(
         payload_base64: STANDARD.encode(payload_bytes),
         verified: true,
     }))
+}
+
+async fn get_tag(
+    State(state): State<AppState>,
+    Path(tag): Path<String>,
+) -> Result<Json<TagLookupResponse>, ApiError> {
+    let object_ids = state
+        .metadata_store
+        .objects_for_tag(&tag)
+        .map_err(|err| ApiError::Metadata(err.to_string()))?;
+    let mut objects = Vec::with_capacity(object_ids.len());
+
+    for object_id in object_ids {
+        let metadata = state
+            .metadata_store
+            .get_object_metadata(object_id)
+            .map_err(|err| ApiError::Metadata(err.to_string()))?
+            .ok_or_else(|| {
+                ApiError::Metadata("tag index points to missing object metadata".to_owned())
+            })?;
+        objects.push(ObjectSummary {
+            object_id: metadata.object_id.to_string(),
+            object_type: object_kind_to_str(metadata.object_kind).to_owned(),
+            author_agent_id: metadata.author_agent_id.to_string(),
+            created_at_ms: metadata.created_at_ms,
+            mime_type: metadata.mime_type,
+            payload_size: metadata.payload_size,
+            chunk_count: metadata.chunk_count,
+        });
+    }
+
+    Ok(Json(TagLookupResponse { tag, objects }))
 }
 
 async fn assemble_payload(
@@ -431,6 +481,111 @@ mod tests {
             test_app.metadata_store.objects_for_tag("rust").unwrap(),
             vec![object_id]
         );
+    }
+
+    #[tokio::test]
+    async fn tag_lookup_requires_auth() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/tags/rust")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn unknown_tag_returns_empty_list() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(authorized_get_request("/v1/tags/unknown"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: TagLookupResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.tag, "unknown");
+        assert!(body.objects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tag_lookup_returns_published_object_summary() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let test_app = test_app(&tempdir);
+        let response = test_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "text/plain",
+                    "payload_base64": STANDARD.encode(b"hello"),
+                    "tags": ["rust"]
+                }),
+            ))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = test_app
+            .router
+            .oneshot(authorized_get_request("/v1/tags/rust"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: TagLookupResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.tag, "rust");
+        assert_eq!(body.objects.len(), 1);
+        assert_eq!(body.objects[0].object_id, published.object_id);
+        assert_eq!(body.objects[0].object_type, "fact");
+        assert_eq!(body.objects[0].mime_type, "text/plain");
+        assert_eq!(body.objects[0].payload_size, 5);
+        assert_eq!(body.objects[0].chunk_count, 0);
+    }
+
+    #[tokio::test]
+    async fn tag_lookup_is_exact_match() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let test_app = test_app(&tempdir);
+        let response = test_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "text/plain",
+                    "payload_base64": STANDARD.encode(b"hello"),
+                    "tags": ["rust-libp2p"]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = test_app
+            .router
+            .oneshot(authorized_get_request("/v1/tags/rust"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: TagLookupResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(body.objects.is_empty());
     }
 
     #[tokio::test]
