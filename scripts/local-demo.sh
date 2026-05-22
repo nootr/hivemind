@@ -159,6 +159,21 @@ ENVELOPE_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${TOKEN}" \
   "http://127.0.0.1:17747/v1/objects/${PARENT_OBJECT_ID}/envelope")"
 
+IMPORT_ENVELOPE_BODY="$(ENVELOPE_RESPONSE="${ENVELOPE_RESPONSE}" python3 - <<'PY'
+import json
+import os
+envelope = json.loads(os.environ["ENVELOPE_RESPONSE"])
+print(json.dumps({"envelope_cbor_base64": envelope["envelope_cbor_base64"]}))
+PY
+)"
+
+log "importing exported parent envelope idempotently"
+IMPORT_ENVELOPE_RESPONSE="$(curl --silent --fail \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "${IMPORT_ENVELOPE_BODY}" \
+  http://127.0.0.1:17747/v1/objects/envelope)"
+
 log "looking up objects by exact tag: demo"
 TAG_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${TOKEN}" \
@@ -172,6 +187,22 @@ REFERRERS_RESPONSE="$(curl --silent --fail \
 log "retrieving chunk by ID"
 CHUNK_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${TOKEN}" \
+  "http://127.0.0.1:17747/v1/chunks/${CHUNK_ID}")"
+
+PUT_CHUNK_BODY="$(CHUNK_RESPONSE="${CHUNK_RESPONSE}" python3 - <<'PY'
+import json
+import os
+chunk = json.loads(os.environ["CHUNK_RESPONSE"])
+print(json.dumps({"bytes_base64": chunk["bytes_base64"]}))
+PY
+)"
+
+log "importing retrieved chunk idempotently"
+PUT_CHUNK_RESPONSE="$(curl --silent --fail \
+  -X PUT \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "${PUT_CHUNK_BODY}" \
   "http://127.0.0.1:17747/v1/chunks/${CHUNK_ID}")"
 
 GET_RESPONSE="${GET_RESPONSE}" python3 - "${PARENT_OBJECT_ID}" <<'PY'
@@ -216,6 +247,16 @@ assert len(base64.b64decode(body["envelope_cbor_base64"])) > 0
 assert body["verified"] is True
 PY
 
+IMPORT_ENVELOPE_RESPONSE="${IMPORT_ENVELOPE_RESPONSE}" python3 - "${PARENT_OBJECT_ID}" <<'PY'
+import json
+import os
+import sys
+object_id = sys.argv[1]
+body = json.loads(os.environ["IMPORT_ENVELOPE_RESPONSE"])
+assert body["object_id"] == object_id
+assert body["chunk_ids"] == []
+PY
+
 TAG_RESPONSE="${TAG_RESPONSE}" python3 - "${PARENT_OBJECT_ID}" <<'PY'
 import json
 import os
@@ -254,5 +295,16 @@ assert base64.b64decode(body["bytes_base64"]) == bytes([9]) * (16 * 1024 + 1)
 assert body["verified"] is True
 PY
 
-log "verified retrieved payloads, envelope export, tag lookup, backlink response and chunk retrieval"
+PUT_CHUNK_RESPONSE="${PUT_CHUNK_RESPONSE}" python3 - "${CHUNK_ID}" <<'PY'
+import json
+import os
+import sys
+chunk_id = sys.argv[1]
+body = json.loads(os.environ["PUT_CHUNK_RESPONSE"])
+assert body["chunk_id"] == chunk_id
+assert body["size"] == 16 * 1024 + 1
+assert body["verified"] is True
+PY
+
+log "verified retrieved payloads, envelope/chunk import, tag lookup, backlink response and chunk retrieval"
 echo "local demo ok: ${PARENT_OBJECT_ID} <- ${CHILD_OBJECT_ID}; chunk ${CHUNK_ID}"
