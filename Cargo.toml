@@ -17,3 +17,4 @@ minicbor = { version = "0.25", features = ["alloc", "derive"] }
 thiserror = "1.0"
 tokio = { version = "1.38", features = ["fs", "io-util", "macros", "rt"] }
 tempfile = "3.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
