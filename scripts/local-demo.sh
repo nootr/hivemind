@@ -154,6 +154,11 @@ CHILD_GET_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${TOKEN}" \
   "http://127.0.0.1:17747/v1/objects/${CHILD_OBJECT_ID}")"
 
+log "exporting parent object envelope CBOR"
+ENVELOPE_RESPONSE="$(curl --silent --fail \
+  -H "Authorization: Bearer ${TOKEN}" \
+  "http://127.0.0.1:17747/v1/objects/${PARENT_OBJECT_ID}/envelope")"
+
 log "looking up objects by exact tag: demo"
 TAG_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${TOKEN}" \
@@ -199,6 +204,18 @@ assert body["references"] == [parent_id]
 assert body["verified"] is True
 PY
 
+ENVELOPE_RESPONSE="${ENVELOPE_RESPONSE}" python3 - "${PARENT_OBJECT_ID}" <<'PY'
+import base64
+import json
+import os
+import sys
+object_id = sys.argv[1]
+body = json.loads(os.environ["ENVELOPE_RESPONSE"])
+assert body["object_id"] == object_id
+assert len(base64.b64decode(body["envelope_cbor_base64"])) > 0
+assert body["verified"] is True
+PY
+
 TAG_RESPONSE="${TAG_RESPONSE}" python3 - "${PARENT_OBJECT_ID}" <<'PY'
 import json
 import os
@@ -237,5 +254,5 @@ assert base64.b64decode(body["bytes_base64"]) == bytes([9]) * (16 * 1024 + 1)
 assert body["verified"] is True
 PY
 
-log "verified retrieved payloads, tag lookup, backlink response and chunk retrieval"
+log "verified retrieved payloads, envelope export, tag lookup, backlink response and chunk retrieval"
 echo "local demo ok: ${PARENT_OBJECT_ID} <- ${CHILD_OBJECT_ID}; chunk ${CHUNK_ID}"

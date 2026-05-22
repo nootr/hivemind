@@ -4,9 +4,10 @@ Run a single local HIVEMIND node and exercise the first shared-memory flow:
 
 1. publish a memory object
 2. retrieve it by object ID
-3. find it by exact tag
-4. find objects that reference it
-5. retrieve chunk bytes by chunk ID
+3. export its canonical signed envelope
+4. find it by exact tag
+5. find objects that reference it
+6. retrieve chunk bytes by chunk ID
 
 ## Start a node
 
@@ -71,6 +72,18 @@ curl -sS \
 ```
 
 The response includes the base64 payload, tags, references and `verified: true`.
+
+## Export the signed envelope
+
+For node-to-node transfer, export the canonical signed object envelope without assembling payload bytes:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  "http://127.0.0.1:7747/v1/objects/${OBJECT_ID}/envelope"
+```
+
+The response includes base64 deterministic-CBOR envelope bytes and `verified: true`.
 
 ## Find by exact tag
 

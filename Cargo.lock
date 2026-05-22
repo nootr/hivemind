@@ -550,6 +550,7 @@ dependencies = [
  "hivemind-adapters",
  "hivemind-app",
  "hivemind-core",
+ "minicbor",
  "serde",
  "serde_json",
  "tempfile",

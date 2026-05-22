@@ -6,8 +6,9 @@ mod secret_file;
 mod token;
 
 pub use api::{
-    app, ApiConfig, ApiError, AppState, GetChunkResponse, GetObjectResponse, ObjectSummary,
-    PublishObjectRequest, PublishObjectResponse, ReferrersResponse, SystemClock, TagLookupResponse,
+    app, ApiConfig, ApiError, AppState, GetChunkResponse, GetObjectEnvelopeResponse,
+    GetObjectResponse, ObjectSummary, PublishObjectRequest, PublishObjectResponse,
+    ReferrersResponse, SystemClock, TagLookupResponse,
 };
 pub use config::{ApiFileConfig, ConfigError, DataConfig, IdentityConfig, NodeConfig};
 pub use dev_identity::DevIdentity;

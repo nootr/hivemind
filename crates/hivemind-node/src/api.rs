@@ -70,6 +70,13 @@ pub struct GetChunkResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct GetObjectEnvelopeResponse {
+    pub object_id: String,
+    pub envelope_cbor_base64: String,
+    pub verified: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct TagLookupResponse {
     pub tag: String,
     pub objects: Vec<ObjectSummary>,
@@ -141,6 +148,7 @@ pub fn app(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/v1/objects", post(publish_object))
         .route("/v1/objects/{object_id}", get(get_object))
+        .route("/v1/objects/{object_id}/envelope", get(get_object_envelope))
         .route("/v1/objects/{object_id}/referrers", get(get_referrers))
         .route("/v1/chunks/{chunk_id}", get(get_chunk))
         .route("/v1/tags/{tag}", get(get_tag))
@@ -271,6 +279,36 @@ async fn get_object(
             .map(|object_id| object_id.to_string())
             .collect(),
         payload_base64: STANDARD.encode(payload_bytes),
+        verified: true,
+    }))
+}
+
+async fn get_object_envelope(
+    State(state): State<AppState>,
+    Path(object_id): Path<String>,
+) -> Result<Json<GetObjectEnvelopeResponse>, ApiError> {
+    let object_id = object_id
+        .parse::<ObjectId>()
+        .map_err(|_| ApiError::InvalidObjectId)?;
+    let envelope = state
+        .content_store
+        .get_object(object_id)
+        .await
+        .map_err(|err| match err {
+            hivemind_adapters::fs::FsStoreError::Io(io_err)
+                if io_err.kind() == std::io::ErrorKind::NotFound =>
+            {
+                ApiError::ObjectNotFound
+            }
+            other => ApiError::App(other.to_string()),
+        })?;
+    let mut envelope_cbor = Vec::new();
+    minicbor::encode(&envelope, &mut envelope_cbor)
+        .map_err(|_| ApiError::App("failed to encode object envelope".to_owned()))?;
+
+    Ok(Json(GetObjectEnvelopeResponse {
+        object_id: object_id.to_string(),
+        envelope_cbor_base64: STANDARD.encode(envelope_cbor),
         verified: true,
     }))
 }
@@ -935,6 +973,93 @@ mod tests {
         assert_eq!(body.mime_type, "application/octet-stream");
         assert_eq!(STANDARD.decode(body.payload_base64).unwrap(), payload);
         assert!(body.verified);
+    }
+
+    #[tokio::test]
+    async fn get_object_envelope_roundtrips_canonical_cbor() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let test_app = test_app(&tempdir);
+        let response = test_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "text/plain",
+                    "payload_base64": STANDARD.encode(b"hello"),
+                    "tags": ["rust"]
+                }),
+            ))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = test_app
+            .router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{}/envelope",
+                published.object_id
+            )))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: GetObjectEnvelopeResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.object_id, published.object_id);
+        assert!(body.verified);
+        let envelope_bytes = STANDARD.decode(body.envelope_cbor_base64).unwrap();
+        let envelope: hivemind_core::ObjectEnvelope = minicbor::decode(&envelope_bytes).unwrap();
+        envelope.verify().unwrap();
+        assert_eq!(envelope.object_id.to_string(), published.object_id);
+        assert_eq!(envelope.body.tags, vec!["rust"]);
+    }
+
+    #[tokio::test]
+    async fn get_object_envelope_requires_auth() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/objects/not-an-id/envelope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_object_envelope_invalid_object_id_returns_bad_request() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(authorized_get_request("/v1/objects/not-an-id/envelope"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_missing_object_envelope_returns_not_found() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let missing_id = "00".repeat(32);
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{missing_id}/envelope"
+            )))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
