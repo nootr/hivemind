@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{Path, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -13,7 +13,7 @@ use hivemind_adapters::{
     sqlite::{SqliteMetadataStore, StoredChunk},
 };
 use hivemind_app::{AppResult, ClockPort, IdentityPort, PublishObject, PublishObjectInput};
-use hivemind_core::{ObjectKind, Payload};
+use hivemind_core::{ObjectId, ObjectKind, Payload};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -46,6 +46,18 @@ pub struct PublishObjectResponse {
     pub chunk_ids: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct GetObjectResponse {
+    pub object_id: String,
+    pub object_type: String,
+    pub author_agent_id: String,
+    pub created_at_ms: u64,
+    pub mime_type: String,
+    pub tags: Vec<String>,
+    pub payload_base64: String,
+    pub verified: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("unauthorized")]
@@ -53,6 +65,12 @@ pub enum ApiError {
 
     #[error("invalid object type")]
     InvalidObjectType,
+
+    #[error("invalid object id")]
+    InvalidObjectId,
+
+    #[error("object not found")]
+    ObjectNotFound,
 
     #[error("invalid base64 payload")]
     InvalidBase64,
@@ -68,7 +86,10 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
-            ApiError::InvalidObjectType | ApiError::InvalidBase64 => StatusCode::BAD_REQUEST,
+            ApiError::InvalidObjectType | ApiError::InvalidObjectId | ApiError::InvalidBase64 => {
+                StatusCode::BAD_REQUEST
+            }
+            ApiError::ObjectNotFound => StatusCode::NOT_FOUND,
             ApiError::App(_) | ApiError::Metadata(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, self.to_string()).into_response()
@@ -78,6 +99,7 @@ impl IntoResponse for ApiError {
 pub fn app(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/v1/objects", post(publish_object))
+        .route("/v1/objects/{object_id}", get(get_object))
         .route_layer(middleware::from_fn_with_state(
             state.config.clone(),
             require_bearer_auth,
@@ -165,6 +187,67 @@ async fn publish_object(
     }))
 }
 
+async fn get_object(
+    State(state): State<AppState>,
+    Path(object_id): Path<String>,
+) -> Result<Json<GetObjectResponse>, ApiError> {
+    let object_id = object_id
+        .parse::<ObjectId>()
+        .map_err(|_| ApiError::InvalidObjectId)?;
+    let envelope = state
+        .content_store
+        .get_object(object_id)
+        .await
+        .map_err(|err| match err {
+            hivemind_adapters::fs::FsStoreError::Io(io_err)
+                if io_err.kind() == std::io::ErrorKind::NotFound =>
+            {
+                ApiError::ObjectNotFound
+            }
+            other => ApiError::App(other.to_string()),
+        })?;
+    envelope
+        .verify()
+        .map_err(|err| ApiError::App(err.to_string()))?;
+    let (mime_type, payload_bytes) =
+        assemble_payload(&state.content_store, &envelope.body.payload).await?;
+
+    Ok(Json(GetObjectResponse {
+        object_id: envelope.object_id.to_string(),
+        object_type: object_kind_to_str(envelope.body.kind).to_owned(),
+        author_agent_id: envelope.body.author.to_string(),
+        created_at_ms: envelope.body.created_at_ms,
+        mime_type,
+        tags: envelope.body.tags,
+        payload_base64: STANDARD.encode(payload_bytes),
+        verified: true,
+    }))
+}
+
+async fn assemble_payload(
+    store: &FsContentStore,
+    payload: &Payload,
+) -> Result<(String, Vec<u8>), ApiError> {
+    match payload {
+        Payload::Inline(inline) => Ok((inline.mime_type.clone(), inline.bytes.clone())),
+        Payload::Chunked(chunked) => {
+            let mut bytes = Vec::with_capacity(chunked.total_size as usize);
+            for chunk in &chunked.chunks {
+                bytes.extend(
+                    store
+                        .get_chunk(chunk.chunk_id)
+                        .await
+                        .map_err(|err| ApiError::App(err.to_string()))?,
+                );
+            }
+            if bytes.len() as u64 != chunked.total_size {
+                return Err(ApiError::App("assembled payload size mismatch".to_owned()));
+            }
+            Ok((chunked.mime_type.clone(), bytes))
+        }
+    }
+}
+
 fn stored_chunks_from_payload(store: &FsContentStore, payload: &Payload) -> Vec<StoredChunk> {
     match payload {
         Payload::Inline(_) => Vec::new(),
@@ -181,6 +264,19 @@ fn stored_chunks_from_payload(store: &FsContentStore, payload: &Payload) -> Vec<
                     .into_owned(),
             })
             .collect(),
+    }
+}
+
+fn object_kind_to_str(kind: ObjectKind) -> &'static str {
+    match kind {
+        ObjectKind::Skill => "skill",
+        ObjectKind::Fact => "fact",
+        ObjectKind::Procedure => "procedure",
+        ObjectKind::Insight => "insight",
+        ObjectKind::Rating => "rating",
+        ObjectKind::Report => "report",
+        ObjectKind::Tombstone => "tombstone",
+        ObjectKind::Alias => "alias",
     }
 }
 
@@ -260,6 +356,15 @@ mod tests {
         }
     }
 
+    fn authorized_get_request(path: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap()
+    }
+
     fn authorized_json_request(path: &str, body: serde_json::Value) -> Request<Body> {
         Request::builder()
             .method(Method::POST)
@@ -326,6 +431,132 @@ mod tests {
             test_app.metadata_store.objects_for_tag("rust").unwrap(),
             vec![object_id]
         );
+    }
+
+    #[tokio::test]
+    async fn get_inline_object_roundtrips_payload() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let test_app = test_app(&tempdir);
+        let response = test_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "text/plain",
+                    "payload_base64": STANDARD.encode(b"hello"),
+                    "tags": ["rust"]
+                }),
+            ))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = test_app
+            .router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{}",
+                published.object_id
+            )))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: GetObjectResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.object_id, published.object_id);
+        assert_eq!(body.object_type, "fact");
+        assert!(!body.author_agent_id.is_empty());
+        assert_eq!(body.created_at_ms, 1_700_000_000_000);
+        assert_eq!(body.mime_type, "text/plain");
+        assert_eq!(body.tags, vec!["rust"]);
+        assert_eq!(STANDARD.decode(body.payload_base64).unwrap(), b"hello");
+        assert!(body.verified);
+    }
+
+    #[tokio::test]
+    async fn get_chunked_object_roundtrips_payload() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let test_app = test_app(&tempdir);
+        let payload = vec![7_u8; hivemind_core::INLINE_OBJECT_THRESHOLD + 1];
+        let response = test_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "application/octet-stream",
+                    "payload_base64": STANDARD.encode(&payload),
+                    "tags": []
+                }),
+            ))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(!published.chunk_ids.is_empty());
+
+        let response = test_app
+            .router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{}",
+                published.object_id
+            )))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: GetObjectResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.mime_type, "application/octet-stream");
+        assert_eq!(STANDARD.decode(body.payload_base64).unwrap(), payload);
+        assert!(body.verified);
+    }
+
+    #[tokio::test]
+    async fn get_requires_auth() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/objects/not-an-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_invalid_object_id_returns_bad_request() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(authorized_get_request("/v1/objects/not-an-id"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_missing_object_returns_not_found() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let missing_id = "00".repeat(32);
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(authorized_get_request(&format!("/v1/objects/{missing_id}")))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
