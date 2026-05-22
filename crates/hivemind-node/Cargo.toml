@@ -14,6 +14,7 @@ hex.workspace = true
 hivemind-adapters = { path = "../hivemind-adapters" }
 hivemind-app = { path = "../hivemind-app" }
 hivemind-core = { path = "../hivemind-core" }
+minicbor.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net"] }
