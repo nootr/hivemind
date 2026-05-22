@@ -18,10 +18,17 @@ Run a single local node and exercise publish, retrieve and tag lookup:
 scripts/local-demo.sh
 ```
 
-For manual curl commands, see [docs/local-demo.md](docs/local-demo.md).
+Run two local nodes and transfer a verified chunked object from node A to node B:
+
+```bash
+scripts/two-node-transfer-demo.sh
+```
+
+For manual curl commands, see [docs/local-demo.md](docs/local-demo.md) and [docs/two-node-transfer.md](docs/two-node-transfer.md).
 
 ## Docs
 
 - Protocol website: https://nootr.github.io/hivemind/
 - v1 architecture: [docs/architecture-v1.md](docs/architecture-v1.md)
 - local demo: [docs/local-demo.md](docs/local-demo.md)
+- two-node transfer demo: [docs/two-node-transfer.md](docs/two-node-transfer.md)
