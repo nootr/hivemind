@@ -33,6 +33,17 @@ On first start, the node creates:
 
 `/health` is unauthenticated. `/v1/*` requires bearer auth.
 
+Errors are JSON responses with a stable error code:
+
+```json
+{
+  "error": {
+    "code": "invalid_object_id",
+    "message": "invalid object id"
+  }
+}
+```
+
 ## Publish an object
 
 In another shell:

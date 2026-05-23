@@ -122,6 +122,17 @@ pub struct ObjectSummary {
     pub chunk_count: u32,
 }
 
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ErrorResponse {
+    pub error: ErrorBody,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ErrorBody {
+    pub code: String,
+    pub message: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("unauthorized")]
@@ -164,9 +175,9 @@ pub enum ApiError {
     Metadata(String),
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let status = match self {
+impl ApiError {
+    fn status(&self) -> StatusCode {
+        match self {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::InvalidObjectType
             | ApiError::InvalidObjectId
@@ -177,8 +188,45 @@ impl IntoResponse for ApiError {
             ApiError::MissingObjectChunks | ApiError::ContentConflict => StatusCode::CONFLICT,
             ApiError::ObjectNotFound | ApiError::ChunkNotFound => StatusCode::NOT_FOUND,
             ApiError::App(_) | ApiError::Metadata(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn code(&self) -> &'static str {
+        match self {
+            ApiError::Unauthorized => "unauthorized",
+            ApiError::InvalidObjectType => "invalid_object_type",
+            ApiError::InvalidObjectId => "invalid_object_id",
+            ApiError::InvalidChunkId => "invalid_chunk_id",
+            ApiError::InvalidChunkContent => "invalid_chunk_content",
+            ApiError::InvalidObjectEnvelope => "invalid_object_envelope",
+            ApiError::MissingObjectChunks => "missing_object_chunks",
+            ApiError::ContentConflict => "content_conflict",
+            ApiError::ObjectNotFound => "object_not_found",
+            ApiError::ChunkNotFound => "chunk_not_found",
+            ApiError::InvalidBase64 => "invalid_base64",
+            ApiError::App(_) => "application_error",
+            ApiError::Metadata(_) => "metadata_error",
+        }
+    }
+
+    fn public_message(&self) -> String {
+        match self {
+            ApiError::App(_) | ApiError::Metadata(_) => "internal server error".to_owned(),
+            other => other.to_string(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = self.status();
+        let body = ErrorResponse {
+            error: ErrorBody {
+                code: self.code().to_owned(),
+                message: self.public_message(),
+            },
         };
-        (status, self.to_string()).into_response()
+        (status, Json(body)).into_response()
     }
 }
 
@@ -716,6 +764,21 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    async fn error_response(response: Response) -> ErrorResponse {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn internal_errors_return_generic_json_message() {
+        let response = ApiError::App("secret database path leaked".to_owned()).into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = error_response(response).await;
+        assert_eq!(body.error.code, "application_error");
+        assert_eq!(body.error.message, "internal server error");
     }
 
     #[tokio::test]
@@ -1579,6 +1642,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = error_response(response).await;
+        assert_eq!(body.error.code, "invalid_object_id");
+        assert_eq!(body.error.message, "invalid object id");
     }
 
     #[tokio::test]
@@ -1611,6 +1677,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = error_response(response).await;
+        assert_eq!(body.error.code, "unauthorized");
+        assert_eq!(body.error.message, "unauthorized");
     }
 
     #[tokio::test]
