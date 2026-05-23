@@ -5,7 +5,7 @@ This demo runs two local HIVEMIND nodes and transfers one chunked object from no
 Flow:
 
 1. node A publishes a chunked object
-2. node A exports the signed object envelope
+2. node A exports the signed object envelope plus transfer chunk IDs
 3. node A serves the referenced chunk
 4. the script confirms node B does not have the object yet
 5. node B imports the chunk by content ID
@@ -28,6 +28,7 @@ two-node transfer ok: <object_id> via chunk <chunk_id>
 This is not DHT networking yet. It proves the local content-transfer contract that the future node-to-node protocol can automate:
 
 - chunks are content-addressed and verified on import
+- envelope export includes signed deterministic-CBOR bytes and transfer chunk IDs
 - envelopes are signed, deterministic-CBOR encoded, and verified on import
 - chunked envelopes require chunks to be locally available first
 - imported objects are indexed for tag lookup and retrieval
