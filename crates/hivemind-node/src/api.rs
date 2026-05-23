@@ -96,6 +96,7 @@ pub struct GetChunkResponse {
 pub struct GetObjectEnvelopeResponse {
     pub object_id: String,
     pub envelope_cbor_base64: String,
+    pub chunk_ids: Vec<String>,
     pub verified: bool,
 }
 
@@ -433,6 +434,7 @@ async fn get_object_envelope(
     Ok(Json(GetObjectEnvelopeResponse {
         object_id: object_id.to_string(),
         envelope_cbor_base64: STANDARD.encode(envelope_cbor),
+        chunk_ids: chunk_ids_from_payload(&envelope.body.payload),
         verified: true,
     }))
 }
@@ -1229,12 +1231,53 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: GetObjectEnvelopeResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body.object_id, published.object_id);
+        assert!(body.chunk_ids.is_empty());
         assert!(body.verified);
         let envelope_bytes = STANDARD.decode(body.envelope_cbor_base64).unwrap();
         let envelope: hivemind_core::ObjectEnvelope = minicbor::decode(&envelope_bytes).unwrap();
         envelope.verify().unwrap();
         assert_eq!(envelope.object_id.to_string(), published.object_id);
         assert_eq!(envelope.body.tags, vec!["rust"]);
+    }
+
+    #[tokio::test]
+    async fn get_chunked_object_envelope_returns_chunk_ids() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let test_app = test_app(&tempdir);
+        let payload = vec![7_u8; hivemind_core::INLINE_OBJECT_THRESHOLD + 1];
+        let response = test_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "application/octet-stream",
+                    "payload_base64": STANDARD.encode(&payload),
+                    "tags": []
+                }),
+            ))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(!published.chunk_ids.is_empty());
+
+        let response = test_app
+            .router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{}/envelope",
+                published.object_id
+            )))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: GetObjectEnvelopeResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.object_id, published.object_id);
+        assert_eq!(body.chunk_ids, published.chunk_ids);
+        assert!(body.verified);
     }
 
     #[tokio::test]

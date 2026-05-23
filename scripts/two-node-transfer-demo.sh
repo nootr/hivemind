@@ -121,8 +121,8 @@ PUBLISH_RESPONSE="$(curl --silent --fail \
   http://127.0.0.1:17747/v1/objects)"
 
 OBJECT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["object_id"])' <<<"${PUBLISH_RESPONSE}")"
-CHUNK_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["chunk_ids"][0])' <<<"${PUBLISH_RESPONSE}")"
-log "node A published object ${OBJECT_ID} with chunk ${CHUNK_ID}"
+PUBLISHED_CHUNK_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["chunk_ids"][0])' <<<"${PUBLISH_RESPONSE}")"
+log "node A published object ${OBJECT_ID} with chunk ${PUBLISHED_CHUNK_ID}"
 
 log "verifying node B does not have the object before transfer"
 PRE_TRANSFER_STATUS="$(curl --silent --output /dev/null --write-out "%{http_code}" \
@@ -137,6 +137,12 @@ log "exporting object envelope from node A"
 ENVELOPE_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${NODE_A_TOKEN}" \
   "http://127.0.0.1:17747/v1/objects/${OBJECT_ID}/envelope")"
+CHUNK_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["chunk_ids"][0])' <<<"${ENVELOPE_RESPONSE}")"
+if [[ "${CHUNK_ID}" != "${PUBLISHED_CHUNK_ID}" ]]; then
+  echo "envelope chunk id ${CHUNK_ID} did not match publish response ${PUBLISHED_CHUNK_ID}" >&2
+  exit 1
+fi
+log "using transfer chunk id from envelope metadata: ${CHUNK_ID}"
 
 log "retrieving chunk from node A"
 CHUNK_RESPONSE="$(curl --silent --fail \
