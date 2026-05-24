@@ -6,7 +6,7 @@ mod secret_file;
 mod token;
 
 pub use api::{
-    app, ApiConfig, ApiError, AppState, ErrorBody, ErrorResponse, GetChunkResponse,
+    app, ApiConfig, ApiError, AppState, ErrorBody, ErrorDetails, ErrorResponse, GetChunkResponse,
     GetObjectEnvelopeResponse, GetObjectResponse, ImportObjectEnvelopeRequest,
     ImportObjectEnvelopeResponse, ObjectSummary, PublishObjectRequest, PublishObjectResponse,
     PutChunkRequest, PutChunkResponse, ReferrersResponse, SystemClock, TagLookupResponse,

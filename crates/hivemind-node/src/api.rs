@@ -132,6 +132,14 @@ pub struct ErrorResponse {
 pub struct ErrorBody {
     pub code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<ErrorDetails>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ErrorDetails {
+    MissingChunks { chunk_ids: Vec<String> },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -155,7 +163,7 @@ pub enum ApiError {
     InvalidObjectEnvelope,
 
     #[error("object envelope references missing chunks")]
-    MissingObjectChunks,
+    MissingObjectChunks { chunk_ids: Vec<String> },
 
     #[error("stored content conflicts with expected content")]
     ContentConflict,
@@ -186,7 +194,9 @@ impl ApiError {
             | ApiError::InvalidChunkContent
             | ApiError::InvalidObjectEnvelope
             | ApiError::InvalidBase64 => StatusCode::BAD_REQUEST,
-            ApiError::MissingObjectChunks | ApiError::ContentConflict => StatusCode::CONFLICT,
+            ApiError::MissingObjectChunks { .. } | ApiError::ContentConflict => {
+                StatusCode::CONFLICT
+            }
             ApiError::ObjectNotFound | ApiError::ChunkNotFound => StatusCode::NOT_FOUND,
             ApiError::App(_) | ApiError::Metadata(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -200,7 +210,7 @@ impl ApiError {
             ApiError::InvalidChunkId => "invalid_chunk_id",
             ApiError::InvalidChunkContent => "invalid_chunk_content",
             ApiError::InvalidObjectEnvelope => "invalid_object_envelope",
-            ApiError::MissingObjectChunks => "missing_object_chunks",
+            ApiError::MissingObjectChunks { .. } => "missing_object_chunks",
             ApiError::ContentConflict => "content_conflict",
             ApiError::ObjectNotFound => "object_not_found",
             ApiError::ChunkNotFound => "chunk_not_found",
@@ -216,6 +226,15 @@ impl ApiError {
             other => other.to_string(),
         }
     }
+
+    fn details(&self) -> Option<ErrorDetails> {
+        match self {
+            ApiError::MissingObjectChunks { chunk_ids } => Some(ErrorDetails::MissingChunks {
+                chunk_ids: chunk_ids.clone(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -225,6 +244,7 @@ impl IntoResponse for ApiError {
             error: ErrorBody {
                 code: self.code().to_owned(),
                 message: self.public_message(),
+                details: self.details(),
             },
         };
         (status, Json(body)).into_response()
@@ -578,24 +598,29 @@ async fn ensure_chunks_available(
     payload: &Payload,
 ) -> Result<(), ApiError> {
     if let Payload::Chunked(chunked) = payload {
+        let mut missing_chunk_ids = Vec::new();
         for chunk in &chunked.chunks {
-            let bytes = store
-                .get_chunk(chunk.chunk_id)
-                .await
-                .map_err(|err| match err {
-                    hivemind_adapters::fs::FsStoreError::Io(io_err)
-                        if io_err.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        ApiError::MissingObjectChunks
-                    }
-                    hivemind_adapters::fs::FsStoreError::ObjectVerification(_) => {
-                        ApiError::InvalidChunkContent
-                    }
-                    other => ApiError::App(other.to_string()),
-                })?;
+            let bytes = match store.get_chunk(chunk.chunk_id).await {
+                Ok(bytes) => bytes,
+                Err(hivemind_adapters::fs::FsStoreError::Io(io_err))
+                    if io_err.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    missing_chunk_ids.push(chunk.chunk_id.to_string());
+                    continue;
+                }
+                Err(hivemind_adapters::fs::FsStoreError::ObjectVerification(_)) => {
+                    return Err(ApiError::InvalidChunkContent);
+                }
+                Err(other) => return Err(ApiError::App(other.to_string())),
+            };
             if bytes.len() != chunk.size as usize {
                 return Err(ApiError::InvalidChunkContent);
             }
+        }
+        if !missing_chunk_ids.is_empty() {
+            return Err(ApiError::MissingObjectChunks {
+                chunk_ids: missing_chunk_ids,
+            });
         }
     }
     Ok(())
@@ -1429,7 +1454,7 @@ mod tests {
         let target_tempdir = tempfile::tempdir().unwrap();
         let source_app = test_app(&source_tempdir);
         let target_app = test_app(&target_tempdir);
-        let payload = vec![7_u8; hivemind_core::INLINE_OBJECT_THRESHOLD + 1];
+        let payload = vec![7_u8; hivemind_core::DEFAULT_CHUNK_SIZE + 1];
         let response = source_app
             .router
             .clone()
@@ -1446,6 +1471,7 @@ mod tests {
             .unwrap();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(published.chunk_ids.len() > 1);
         let response = source_app
             .router
             .oneshot(authorized_get_request(&format!(
@@ -1469,6 +1495,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = error_response(response).await;
+        assert_eq!(body.error.code, "missing_object_chunks");
+        assert_eq!(
+            body.error.message,
+            "object envelope references missing chunks"
+        );
+        assert_eq!(
+            body.error.details,
+            Some(ErrorDetails::MissingChunks {
+                chunk_ids: published.chunk_ids,
+            })
+        );
     }
 
     #[tokio::test]

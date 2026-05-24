@@ -156,7 +156,22 @@ curl -sS \
   http://127.0.0.1:7747/v1/objects/envelope
 ```
 
-For chunked objects, import required chunks before importing the envelope. Envelope import verifies the signature and records local metadata/tag/reference indexes.
+For chunked objects, import required chunks before importing the envelope. If chunks are missing, envelope import returns `409` with missing chunk IDs:
+
+```json
+{
+  "error": {
+    "code": "missing_object_chunks",
+    "message": "object envelope references missing chunks",
+    "details": {
+      "type": "missing_chunks",
+      "chunk_ids": ["..."]
+    }
+  }
+}
+```
+
+Envelope import verifies the signature and records local metadata/tag/reference indexes.
 
 ## Smoke test
 
