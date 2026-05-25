@@ -103,7 +103,7 @@ NODE_B_TOKEN="$(tr -d '\n' < "${WORKDIR}/node-b-data/api.token")"
 PUBLISH_BODY="$(python3 - <<'PY'
 import base64
 import json
-payload = b"two node transfer payload:" + bytes([42]) * (16 * 1024 + 1)
+payload = b"two node transfer payload:" + bytes([42]) * (64 * 1024 + 1)
 print(json.dumps({
     "object_type": "fact",
     "mime_type": "application/octet-stream",
@@ -121,8 +121,12 @@ PUBLISH_RESPONSE="$(curl --silent --fail \
   http://127.0.0.1:17747/v1/objects)"
 
 OBJECT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["object_id"])' <<<"${PUBLISH_RESPONSE}")"
-PUBLISHED_CHUNK_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["chunk_ids"][0])' <<<"${PUBLISH_RESPONSE}")"
-log "node A published object ${OBJECT_ID} with chunk ${PUBLISHED_CHUNK_ID}"
+mapfile -t PUBLISHED_CHUNK_IDS < <(python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["chunk_ids"]))' <<<"${PUBLISH_RESPONSE}")
+if [[ "${#PUBLISHED_CHUNK_IDS[@]}" -le 1 ]]; then
+  echo "expected a multi-chunk object, got ${#PUBLISHED_CHUNK_IDS[@]} chunk(s)" >&2
+  exit 1
+fi
+log "node A published object ${OBJECT_ID} with ${#PUBLISHED_CHUNK_IDS[@]} chunks"
 
 log "verifying node B does not have the object before transfer"
 PRE_TRANSFER_STATUS="$(curl --silent --output /dev/null --write-out "%{http_code}" \
@@ -137,27 +141,34 @@ log "exporting object envelope from node A"
 ENVELOPE_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${NODE_A_TOKEN}" \
   "http://127.0.0.1:17747/v1/objects/${OBJECT_ID}/envelope")"
-read -r CHUNK_ID CHUNK_SIZE < <(ENVELOPE_RESPONSE="${ENVELOPE_RESPONSE}" python3 - <<'PY'
+mapfile -t TRANSFER_CHUNKS < <(ENVELOPE_RESPONSE="${ENVELOPE_RESPONSE}" python3 - <<'PY'
 import json
 import os
 envelope = json.loads(os.environ["ENVELOPE_RESPONSE"])
-chunk = envelope["chunks"][0]
-assert envelope["chunk_ids"] == [chunk["chunk_id"]]
-print(chunk["chunk_id"], chunk["size"])
+assert envelope["chunk_ids"] == [chunk["chunk_id"] for chunk in envelope["chunks"]]
+for chunk in envelope["chunks"]:
+    print(chunk["index"], chunk["chunk_id"], chunk["size"])
 PY
 )
-if [[ "${CHUNK_ID}" != "${PUBLISHED_CHUNK_ID}" ]]; then
-  echo "envelope chunk id ${CHUNK_ID} did not match publish response ${PUBLISHED_CHUNK_ID}" >&2
+if [[ "${#TRANSFER_CHUNKS[@]}" -ne "${#PUBLISHED_CHUNK_IDS[@]}" ]]; then
+  echo "envelope chunk count ${#TRANSFER_CHUNKS[@]} did not match publish response ${#PUBLISHED_CHUNK_IDS[@]}" >&2
   exit 1
 fi
-log "using transfer chunk from envelope metadata: ${CHUNK_ID} (${CHUNK_SIZE} bytes)"
+log "using ${#TRANSFER_CHUNKS[@]} transfer chunks from envelope metadata"
 
-log "retrieving chunk from node A"
-CHUNK_RESPONSE="$(curl --silent --fail \
-  -H "Authorization: Bearer ${NODE_A_TOKEN}" \
-  "http://127.0.0.1:17747/v1/chunks/${CHUNK_ID}")"
+for CHUNK_ENTRY in "${TRANSFER_CHUNKS[@]}"; do
+  read -r CHUNK_INDEX CHUNK_ID CHUNK_SIZE <<<"${CHUNK_ENTRY}"
+  if [[ "${CHUNK_ID}" != "${PUBLISHED_CHUNK_IDS[${CHUNK_INDEX}]}" ]]; then
+    echo "envelope chunk ${CHUNK_INDEX} id ${CHUNK_ID} did not match publish response ${PUBLISHED_CHUNK_IDS[${CHUNK_INDEX}]}" >&2
+    exit 1
+  fi
 
-PUT_CHUNK_BODY="$(CHUNK_RESPONSE="${CHUNK_RESPONSE}" python3 - <<'PY'
+  log "retrieving chunk ${CHUNK_INDEX} from node A: ${CHUNK_ID} (${CHUNK_SIZE} bytes)"
+  CHUNK_RESPONSE="$(curl --silent --fail \
+    -H "Authorization: Bearer ${NODE_A_TOKEN}" \
+    "http://127.0.0.1:17747/v1/chunks/${CHUNK_ID}")"
+
+  PUT_CHUNK_BODY="$(CHUNK_RESPONSE="${CHUNK_RESPONSE}" python3 - <<'PY'
 import json
 import os
 chunk = json.loads(os.environ["CHUNK_RESPONSE"])
@@ -165,13 +176,14 @@ print(json.dumps({"bytes_base64": chunk["bytes_base64"]}))
 PY
 )"
 
-log "importing chunk into node B"
-curl --silent --fail \
-  -X PUT \
-  -H "Authorization: Bearer ${NODE_B_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "${PUT_CHUNK_BODY}" \
-  "http://127.0.0.1:17748/v1/chunks/${CHUNK_ID}" >/dev/null
+  log "importing chunk ${CHUNK_INDEX} into node B"
+  curl --silent --fail \
+    -X PUT \
+    -H "Authorization: Bearer ${NODE_B_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "${PUT_CHUNK_BODY}" \
+    "http://127.0.0.1:17748/v1/chunks/${CHUNK_ID}" >/dev/null
+done
 
 IMPORT_ENVELOPE_BODY="$(ENVELOPE_RESPONSE="${ENVELOPE_RESPONSE}" python3 - <<'PY'
 import json
@@ -198,15 +210,16 @@ TAG_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${NODE_B_TOKEN}" \
   http://127.0.0.1:17748/v1/tags/two-node)"
 
-IMPORT_RESPONSE="${IMPORT_RESPONSE}" python3 - "${OBJECT_ID}" "${CHUNK_ID}" <<'PY'
+IMPORT_RESPONSE="${IMPORT_RESPONSE}" ENVELOPE_RESPONSE="${ENVELOPE_RESPONSE}" python3 - "${OBJECT_ID}" <<'PY'
 import json
 import os
 import sys
 object_id = sys.argv[1]
-chunk_id = sys.argv[2]
 body = json.loads(os.environ["IMPORT_RESPONSE"])
+envelope = json.loads(os.environ["ENVELOPE_RESPONSE"])
+chunk_ids = [chunk["chunk_id"] for chunk in envelope["chunks"]]
 assert body["object_id"] == object_id
-assert body["chunk_ids"] == [chunk_id]
+assert body["chunk_ids"] == chunk_ids
 PY
 
 GET_RESPONSE="${GET_RESPONSE}" python3 - "${OBJECT_ID}" <<'PY'
@@ -215,7 +228,7 @@ import json
 import os
 import sys
 object_id = sys.argv[1]
-expected = b"two node transfer payload:" + bytes([42]) * (16 * 1024 + 1)
+expected = b"two node transfer payload:" + bytes([42]) * (64 * 1024 + 1)
 body = json.loads(os.environ["GET_RESPONSE"])
 assert body["object_id"] == object_id
 assert body["object_type"] == "fact"
@@ -237,4 +250,4 @@ assert body["objects"][0]["object_id"] == object_id
 PY
 
 log "verified node B can retrieve and discover transferred object"
-echo "two-node transfer ok: ${OBJECT_ID} via chunk ${CHUNK_ID}"
+echo "two-node transfer ok: ${OBJECT_ID} via ${#TRANSFER_CHUNKS[@]} chunks"

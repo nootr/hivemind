@@ -1294,7 +1294,7 @@ mod tests {
     async fn get_chunked_object_envelope_returns_chunk_ids() {
         let tempdir = tempfile::tempdir().unwrap();
         let test_app = test_app(&tempdir);
-        let payload = vec![7_u8; hivemind_core::INLINE_OBJECT_THRESHOLD + 1];
+        let payload = vec![7_u8; hivemind_core::DEFAULT_CHUNK_SIZE + 1];
         let response = test_app
             .router
             .clone()
@@ -1311,7 +1311,7 @@ mod tests {
             .unwrap();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
-        assert!(!published.chunk_ids.is_empty());
+        assert!(published.chunk_ids.len() > 1);
 
         let response = test_app
             .router
@@ -1330,7 +1330,13 @@ mod tests {
         assert_eq!(body.chunks.len(), published.chunk_ids.len());
         assert_eq!(body.chunks[0].index, 0);
         assert_eq!(body.chunks[0].chunk_id, published.chunk_ids[0]);
-        assert_eq!(body.chunks[0].size, payload.len() as u32);
+        assert_eq!(
+            body.chunks[0].size,
+            hivemind_core::DEFAULT_CHUNK_SIZE as u32
+        );
+        assert_eq!(body.chunks[1].index, 1);
+        assert_eq!(body.chunks[1].chunk_id, published.chunk_ids[1]);
+        assert_eq!(body.chunks[1].size, 1);
         assert!(body.verified);
     }
 
@@ -1544,7 +1550,7 @@ mod tests {
         let target_tempdir = tempfile::tempdir().unwrap();
         let source_app = test_app(&source_tempdir);
         let target_app = test_app(&target_tempdir);
-        let payload = vec![7_u8; hivemind_core::INLINE_OBJECT_THRESHOLD + 1];
+        let payload = vec![7_u8; hivemind_core::DEFAULT_CHUNK_SIZE + 1];
         let response = source_app
             .router
             .clone()
@@ -1561,7 +1567,7 @@ mod tests {
             .unwrap();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
-        let chunk_id = published.chunk_ids[0].clone();
+        assert!(published.chunk_ids.len() > 1);
         let response = source_app
             .router
             .clone()
@@ -1573,26 +1579,32 @@ mod tests {
             .unwrap();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let envelope: GetObjectEnvelopeResponse = serde_json::from_slice(&bytes).unwrap();
-        let response = source_app
-            .router
-            .oneshot(authorized_get_request(&format!("/v1/chunks/{chunk_id}")))
-            .await
-            .unwrap();
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let chunk: GetChunkResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(envelope.chunks.len(), published.chunk_ids.len());
 
-        let response = target_app
-            .router
-            .clone()
-            .oneshot(authorized_put_json_request(
-                &format!("/v1/chunks/{chunk_id}"),
-                serde_json::json!({
-                    "bytes_base64": chunk.bytes_base64
-                }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        for chunk_id in &published.chunk_ids {
+            let response = source_app
+                .router
+                .clone()
+                .oneshot(authorized_get_request(&format!("/v1/chunks/{chunk_id}")))
+                .await
+                .unwrap();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let chunk: GetChunkResponse = serde_json::from_slice(&bytes).unwrap();
+
+            let response = target_app
+                .router
+                .clone()
+                .oneshot(authorized_put_json_request(
+                    &format!("/v1/chunks/{chunk_id}"),
+                    serde_json::json!({
+                        "bytes_base64": chunk.bytes_base64
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
         let response = target_app
             .router
             .clone()
