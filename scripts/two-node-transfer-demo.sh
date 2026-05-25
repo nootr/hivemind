@@ -145,6 +145,11 @@ mapfile -t TRANSFER_CHUNKS < <(ENVELOPE_RESPONSE="${ENVELOPE_RESPONSE}" python3 
 import json
 import os
 envelope = json.loads(os.environ["ENVELOPE_RESPONSE"])
+assert envelope["object_type"] == "fact"
+assert envelope["mime_type"] == "application/octet-stream"
+assert envelope["tags"] == ["two-node", "transfer"]
+assert envelope["payload_size"] == len(b"two node transfer payload:") + 64 * 1024 + 1
+assert envelope["chunk_count"] == len(envelope["chunks"])
 assert envelope["chunk_ids"] == [chunk["chunk_id"] for chunk in envelope["chunks"]]
 for chunk in envelope["chunks"]:
     print(chunk["index"], chunk["chunk_id"], chunk["size"])

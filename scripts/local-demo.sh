@@ -243,6 +243,12 @@ import sys
 object_id = sys.argv[1]
 body = json.loads(os.environ["ENVELOPE_RESPONSE"])
 assert body["object_id"] == object_id
+assert body["object_type"] == "fact"
+assert body["mime_type"] == "text/plain"
+assert body["tags"] == ["demo", "rust"]
+assert body["references"] == []
+assert body["payload_size"] == len(b"hello from hivemind")
+assert body["chunk_count"] == 0
 assert len(base64.b64decode(body["envelope_cbor_base64"])) > 0
 assert body["chunk_ids"] == []
 assert body["chunks"] == []
