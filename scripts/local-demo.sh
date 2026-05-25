@@ -245,6 +245,7 @@ body = json.loads(os.environ["ENVELOPE_RESPONSE"])
 assert body["object_id"] == object_id
 assert len(base64.b64decode(body["envelope_cbor_base64"])) > 0
 assert body["chunk_ids"] == []
+assert body["chunks"] == []
 assert body["verified"] is True
 PY
 

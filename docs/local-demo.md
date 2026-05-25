@@ -95,7 +95,7 @@ curl -sS \
   "http://127.0.0.1:7747/v1/objects/${OBJECT_ID}/envelope"
 ```
 
-The response includes base64 deterministic-CBOR envelope bytes, transfer `chunk_ids` and `verified: true`.
+The response includes base64 deterministic-CBOR envelope bytes, transfer `chunk_ids`, chunk metadata (`chunks`) and `verified: true`.
 
 ## Find by exact tag
 
