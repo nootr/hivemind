@@ -97,7 +97,15 @@ pub struct GetObjectEnvelopeResponse {
     pub object_id: String,
     pub envelope_cbor_base64: String,
     pub chunk_ids: Vec<String>,
+    pub chunks: Vec<TransferChunk>,
     pub verified: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct TransferChunk {
+    pub index: u32,
+    pub chunk_id: String,
+    pub size: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -455,6 +463,7 @@ async fn get_object_envelope(
         object_id: object_id.to_string(),
         envelope_cbor_base64: STANDARD.encode(envelope_cbor),
         chunk_ids: chunk_ids_from_payload(&envelope.body.payload),
+        chunks: transfer_chunks_from_payload(&envelope.body.payload),
         verified: true,
     }))
 }
@@ -641,6 +650,21 @@ fn chunk_ids_from_payload(payload: &Payload) -> Vec<String> {
             .chunks
             .iter()
             .map(|chunk| chunk.chunk_id.to_string())
+            .collect(),
+    }
+}
+
+fn transfer_chunks_from_payload(payload: &Payload) -> Vec<TransferChunk> {
+    match payload {
+        Payload::Inline(_) => Vec::new(),
+        Payload::Chunked(chunked) => chunked
+            .chunks
+            .iter()
+            .map(|chunk| TransferChunk {
+                index: chunk.index,
+                chunk_id: chunk.chunk_id.to_string(),
+                size: chunk.size,
+            })
             .collect(),
     }
 }
@@ -1257,6 +1281,7 @@ mod tests {
         let body: GetObjectEnvelopeResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body.object_id, published.object_id);
         assert!(body.chunk_ids.is_empty());
+        assert!(body.chunks.is_empty());
         assert!(body.verified);
         let envelope_bytes = STANDARD.decode(body.envelope_cbor_base64).unwrap();
         let envelope: hivemind_core::ObjectEnvelope = minicbor::decode(&envelope_bytes).unwrap();
@@ -1302,6 +1327,10 @@ mod tests {
         let body: GetObjectEnvelopeResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body.object_id, published.object_id);
         assert_eq!(body.chunk_ids, published.chunk_ids);
+        assert_eq!(body.chunks.len(), published.chunk_ids.len());
+        assert_eq!(body.chunks[0].index, 0);
+        assert_eq!(body.chunks[0].chunk_id, published.chunk_ids[0]);
+        assert_eq!(body.chunks[0].size, payload.len() as u32);
         assert!(body.verified);
     }
 

@@ -137,12 +137,20 @@ log "exporting object envelope from node A"
 ENVELOPE_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${NODE_A_TOKEN}" \
   "http://127.0.0.1:17747/v1/objects/${OBJECT_ID}/envelope")"
-CHUNK_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["chunk_ids"][0])' <<<"${ENVELOPE_RESPONSE}")"
+read -r CHUNK_ID CHUNK_SIZE < <(ENVELOPE_RESPONSE="${ENVELOPE_RESPONSE}" python3 - <<'PY'
+import json
+import os
+envelope = json.loads(os.environ["ENVELOPE_RESPONSE"])
+chunk = envelope["chunks"][0]
+assert envelope["chunk_ids"] == [chunk["chunk_id"]]
+print(chunk["chunk_id"], chunk["size"])
+PY
+)
 if [[ "${CHUNK_ID}" != "${PUBLISHED_CHUNK_ID}" ]]; then
   echo "envelope chunk id ${CHUNK_ID} did not match publish response ${PUBLISHED_CHUNK_ID}" >&2
   exit 1
 fi
-log "using transfer chunk id from envelope metadata: ${CHUNK_ID}"
+log "using transfer chunk from envelope metadata: ${CHUNK_ID} (${CHUNK_SIZE} bytes)"
 
 log "retrieving chunk from node A"
 CHUNK_RESPONSE="$(curl --silent --fail \

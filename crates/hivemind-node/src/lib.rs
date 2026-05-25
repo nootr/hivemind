@@ -10,6 +10,7 @@ pub use api::{
     GetObjectEnvelopeResponse, GetObjectResponse, ImportObjectEnvelopeRequest,
     ImportObjectEnvelopeResponse, ObjectSummary, PublishObjectRequest, PublishObjectResponse,
     PutChunkRequest, PutChunkResponse, ReferrersResponse, SystemClock, TagLookupResponse,
+    TransferChunk,
 };
 pub use config::{ApiFileConfig, ConfigError, DataConfig, IdentityConfig, NodeConfig};
 pub use dev_identity::DevIdentity;
