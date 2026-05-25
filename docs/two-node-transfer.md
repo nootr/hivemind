@@ -28,7 +28,7 @@ two-node transfer ok: <object_id> via <n> chunks
 This is not DHT networking yet. It proves the local content-transfer contract that the future node-to-node protocol can automate:
 
 - chunks are content-addressed and verified on import
-- envelope export includes signed deterministic-CBOR bytes and transfer chunk metadata
+- envelope export includes summary metadata, signed deterministic-CBOR bytes and transfer chunk metadata
 - envelopes are signed, deterministic-CBOR encoded, and verified on import
 - chunked envelopes require chunks to be locally available first
 - imported objects are indexed for tag lookup and retrieval

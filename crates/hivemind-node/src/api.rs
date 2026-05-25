@@ -95,6 +95,14 @@ pub struct GetChunkResponse {
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct GetObjectEnvelopeResponse {
     pub object_id: String,
+    pub object_type: String,
+    pub author_agent_id: String,
+    pub created_at_ms: u64,
+    pub mime_type: String,
+    pub tags: Vec<String>,
+    pub references: Vec<String>,
+    pub payload_size: u64,
+    pub chunk_count: u32,
     pub envelope_cbor_base64: String,
     pub chunk_ids: Vec<String>,
     pub chunks: Vec<TransferChunk>,
@@ -459,8 +467,23 @@ async fn get_object_envelope(
     minicbor::encode(&envelope, &mut envelope_cbor)
         .map_err(|_| ApiError::App("failed to encode object envelope".to_owned()))?;
 
+    let (mime_type, payload_size, chunk_count) = payload_metadata(&envelope.body.payload);
+
     Ok(Json(GetObjectEnvelopeResponse {
         object_id: object_id.to_string(),
+        object_type: object_kind_to_str(envelope.body.kind).to_owned(),
+        author_agent_id: envelope.body.author.to_string(),
+        created_at_ms: envelope.body.created_at_ms,
+        mime_type,
+        tags: envelope.body.tags.clone(),
+        references: envelope
+            .body
+            .references
+            .iter()
+            .map(|object_id| object_id.to_string())
+            .collect(),
+        payload_size,
+        chunk_count,
         envelope_cbor_base64: STANDARD.encode(envelope_cbor),
         chunk_ids: chunk_ids_from_payload(&envelope.body.payload),
         chunks: transfer_chunks_from_payload(&envelope.body.payload),
@@ -640,6 +663,17 @@ fn fs_write_error(err: hivemind_adapters::fs::FsStoreError) -> ApiError {
         hivemind_adapters::fs::FsStoreError::ObjectVerification(_) => ApiError::InvalidChunkContent,
         hivemind_adapters::fs::FsStoreError::ContentMismatch => ApiError::ContentConflict,
         other => ApiError::App(other.to_string()),
+    }
+}
+
+fn payload_metadata(payload: &Payload) -> (String, u64, u32) {
+    match payload {
+        Payload::Inline(inline) => (inline.mime_type.clone(), inline.bytes.len() as u64, 0),
+        Payload::Chunked(chunked) => (
+            chunked.mime_type.clone(),
+            chunked.total_size,
+            chunked.chunks.len() as u32,
+        ),
     }
 }
 
@@ -1280,6 +1314,13 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: GetObjectEnvelopeResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body.object_id, published.object_id);
+        assert_eq!(body.object_type, "fact");
+        assert!(!body.author_agent_id.is_empty());
+        assert_eq!(body.mime_type, "text/plain");
+        assert_eq!(body.tags, vec!["rust"]);
+        assert!(body.references.is_empty());
+        assert_eq!(body.payload_size, 5);
+        assert_eq!(body.chunk_count, 0);
         assert!(body.chunk_ids.is_empty());
         assert!(body.chunks.is_empty());
         assert!(body.verified);
@@ -1326,6 +1367,10 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: GetObjectEnvelopeResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body.object_id, published.object_id);
+        assert_eq!(body.object_type, "fact");
+        assert_eq!(body.mime_type, "application/octet-stream");
+        assert_eq!(body.payload_size, payload.len() as u64);
+        assert_eq!(body.chunk_count, published.chunk_ids.len() as u32);
         assert_eq!(body.chunk_ids, published.chunk_ids);
         assert_eq!(body.chunks.len(), published.chunk_ids.len());
         assert_eq!(body.chunks[0].index, 0);
