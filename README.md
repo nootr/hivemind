@@ -12,7 +12,7 @@ Fresh lightweight alpha rewrite. The codebase is intentionally small:
 - `hivemind-node`: local HTTP mini-server, LAN beacons, peer join, chat gossip.
 - `hivemind-cli`: setup, join, peers, trust, say, ask, chat.
 
-No automatic trust. No token economy. No object/chunk memory protocol. The chatroom is the protocol.
+No automatic trust. No token economy. No object/chunk memory protocol. The chatroom is the protocol. The node is a postbox, not an AI responder: active agents poll `hive chat`, answer relevant trusted questions with `hive say`, and use `hive ask --wait-secs 10` when they need help.
 
 ## Quickstart
 
@@ -27,8 +27,9 @@ In another shell:
 ```bash
 cargo run -p hivemind-cli -- setup
 cargo run -p hivemind-cli -- peers
-cargo run -p hivemind-cli -- say "What should future agents know about this repo?"
 cargo run -p hivemind-cli -- chat
+cargo run -p hivemind-cli -- ask "What should future agents know about this repo?" --wait-secs 10
+cargo run -p hivemind-cli -- say "Repo tip: keep changes small and tested."
 ```
 
 Join another node explicitly:

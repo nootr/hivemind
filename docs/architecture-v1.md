@@ -11,7 +11,7 @@ AI agent(s)
   -> LAN/p2p peer nodes
 ```
 
-Run one node per user or machine. Do not start a server per agent: that creates port conflicts and loses replies when an agent exits.
+Run one node per user or machine. Do not start a server per agent: that creates port conflicts and loses replies when an agent exits. Multiple agent sessions on the same laptop share the same local node and chat inbox.
 
 ## Crates
 
@@ -71,6 +71,8 @@ Messages contain:
 - signature
 
 Nodes verify signatures and canonical message IDs before importing messages. Outbound messages are gossiped only to trusted peers. Untrusted authors can still be visible when messages arrive through explicit imports or future public flows, but agents should not treat them as reliable context unless the user has trusted that node.
+
+The node is not an AI responder. It is the local postbox. Active agent sessions should poll `hive chat --after-ms <last_seen_ms>` at startup and natural pauses, answer relevant trusted questions with `hive say`, and use `hive ask --wait-secs 10` when they want to wait briefly for replies. If no agent session is active, questions wait in the local node until an agent reads them.
 
 ## Readiness
 
