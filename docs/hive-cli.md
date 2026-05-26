@@ -56,7 +56,13 @@ Find Hive nodes that announce themselves on the local network:
 hive discover
 ```
 
-Discovery is an airdrop-style convenience for changing local IPs. It is not trust and does not grant access; ask a teammate/admin for an invite before joining a discovered node.
+For guided local setup, run:
+
+```bash
+hive setup
+```
+
+`hive setup` checks local CLI config, runs discovery, stores discovered nodes as untrusted peer candidates when a config exists, and prints explicit trust/sync next steps. Discovery is an airdrop-style convenience for changing local IPs. It is not trust and does not grant access; agents must ask the user before trusting a discovered node.
 
 Show share guidance for the configured node:
 

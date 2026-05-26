@@ -514,7 +514,7 @@
               <div>
                 <h3>Copy one setup prompt into your agent</h3>
                 <p class="muted">This lets the agent discover local nodes, join or initialize Hive, and ask before trusting peers.</p>
-                <textarea id="prompt-setup" class="copy-prompt" readonly onclick="this.select()">Please set up /hive for this repository. Use the HIVEMIND project at https://github.com/nootr/hivemind. Run hive discover first; if a team node is available, connect to it using the appropriate join/setup flow. If no team node is available, configure this as the first team node. Do not trust unknown peer node IDs automatically; ask me before running hive peer trust. Save a bootstrap memory when Hive is ready.</textarea>
+                <textarea id="prompt-setup" class="copy-prompt" readonly onclick="this.select()">Please set up /hive for this repository. Use the HIVEMIND project at https://github.com/nootr/hivemind. Run hive setup first; if a team node is discovered, show me its node ID/fingerprint and ask before trusting it. If no team node is available, configure this as the first team node. Do not trust unknown peer node IDs automatically; ask me before running hive peer trust. Save a bootstrap memory when Hive is ready.</textarea>
                 <button class="copy-button" type="button" data-copy="prompt-setup">Copy setup prompt</button>
               </div>
             </div>

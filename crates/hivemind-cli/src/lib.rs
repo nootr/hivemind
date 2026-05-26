@@ -57,6 +57,13 @@ pub enum Command {
         timeout_ms: u64,
     },
 
+    /// Guided local setup: check config, discover peers and show trust/sync next steps.
+    Setup {
+        /// Discovery timeout in milliseconds.
+        #[arg(long = "timeout-ms", default_value_t = 2000)]
+        timeout_ms: u64,
+    },
+
     /// Show how to share this node with teammates.
     Share {
         /// Node URL to share. Defaults to configured node URL, then localhost.
@@ -339,6 +346,7 @@ pub async fn execute_from_env(cli: Cli, client: &reqwest::Client) -> Result<Stri
         } => init(node_url, token_file, token, config_path),
         Command::Join { invite } => join(client, invite).await,
         Command::Discover { timeout_ms } => discover(timeout_ms),
+        Command::Setup { timeout_ms } => setup(timeout_ms),
         Command::Share { node_url } => share(client, node_url).await,
         Command::Peers => list_peers(),
         Command::Peer { command } => update_peer_trust(command),
@@ -371,6 +379,7 @@ pub async fn execute(
             share_with_config(client, config, advertised_node_url).await
         }
         Command::Discover { timeout_ms } => discover(timeout_ms),
+        Command::Setup { timeout_ms } => setup(timeout_ms),
         Command::Peers | Command::Peer { .. } => execute_from_env(cli, client).await,
         Command::Init { .. } | Command::Join { .. } => execute_from_env(cli, client).await,
     }
@@ -515,6 +524,62 @@ async fn join(client: &reqwest::Client, invite: String) -> Result<String, CliErr
 }
 
 fn discover(timeout_ms: u64) -> Result<String, CliError> {
+    Ok(format_discover_response(discover_nodes(timeout_ms)?))
+}
+
+fn setup(timeout_ms: u64) -> Result<String, CliError> {
+    let path = default_config_path()?;
+    let mut output = vec!["Hive setup".to_owned(), "".to_owned()];
+    let mut config = match read_file_config(&path) {
+        Ok(config) => {
+            output.push(format!("Configured node: {}", config.node_url));
+            output.push(format!("Config: {}", path.display()));
+            Some(config)
+        }
+        Err(CliError::MissingConfig) => {
+            output.push("No local Hive CLI config found yet.".to_owned());
+            output.push("Start or connect a node first, then run one of:".to_owned());
+            output.push(
+                "  hive init --node-url http://127.0.0.1:7747 --token-file ./data/api.token"
+                    .to_owned(),
+            );
+            output.push("  hive join <invite-link-or-code>".to_owned());
+            None
+        }
+        Err(err) => return Err(err),
+    };
+
+    output.push("".to_owned());
+    output.push("Discovering local Hive nodes...".to_owned());
+    let nodes = discover_nodes(timeout_ms)?;
+    output.push(format_discover_response(nodes.clone()));
+
+    if let Some(file_config) = config.as_mut() {
+        let added = merge_discovered_peers(file_config, &nodes);
+        if added > 0 {
+            write_file_config(&path, file_config)?;
+            output.push("".to_owned());
+            output.push(format!(
+                "Stored {added} discovered node(s) as untrusted peer candidates."
+            ));
+        }
+    }
+
+    output.push("".to_owned());
+    output.push("Next steps:".to_owned());
+    output.push("1. Compare the node ID/fingerprint with your teammate out-of-band.".to_owned());
+    output.push("2. Only after user approval, trust it:".to_owned());
+    output.push("   hive peer trust <node-id>".to_owned());
+    output.push(
+        "3. To sync later, an admin can call POST /v1/sync/pull for a trusted node ID.".to_owned(),
+    );
+    output.push("".to_owned());
+    output.push("Discovery is not trust and does not grant access.".to_owned());
+
+    Ok(output.join("\n"))
+}
+
+fn discover_nodes(timeout_ms: u64) -> Result<Vec<DiscoveredNode>, CliError> {
     let timeout = Duration::from_millis(timeout_ms.max(100));
     let socket =
         UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|source| CliError::ConfigRead {
@@ -564,7 +629,32 @@ fn discover(timeout_ms: u64) -> Result<String, CliError> {
         }
     }
 
-    Ok(format_discover_response(nodes.into_values().collect()))
+    Ok(nodes.into_values().collect())
+}
+
+fn merge_discovered_peers(config: &mut FileConfig, nodes: &[DiscoveredNode]) -> usize {
+    let mut added = 0;
+    for node in nodes {
+        if node.node_url == config.node_url {
+            continue;
+        }
+        if let Some(existing) = config
+            .peers
+            .iter_mut()
+            .find(|peer| peer.node_id.as_deref() == Some(node.node_id.as_str()))
+        {
+            existing.node_url = node.node_url.clone();
+            continue;
+        }
+        config.peers.push(FilePeer {
+            node_url: node.node_url.clone(),
+            node_id: Some(node.node_id.clone()),
+            trusted: false,
+            source: "discovery".to_owned(),
+        });
+        added += 1;
+    }
+    added
 }
 
 fn parse_discovery_node(input: &str) -> Option<DiscoveredNode> {
@@ -1054,6 +1144,45 @@ mod tests {
             Cli {
                 command: Command::Discover { timeout_ms: 250 },
             }
+        );
+    }
+
+    #[test]
+    fn parses_setup_command() {
+        let cli = Cli::parse_from(["hive", "setup", "--timeout-ms", "250"]);
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Command::Setup { timeout_ms: 250 },
+            }
+        );
+    }
+
+    #[test]
+    fn merge_discovered_peers_adds_untrusted_candidates_by_node_id() {
+        let mut config = FileConfig {
+            node_url: "https://hive.example.internal".to_owned(),
+            api_token: "secret".to_owned(),
+            peers: Vec::new(),
+        };
+        let nodes = vec![DiscoveredNode {
+            node_url: "https://node-b.internal".to_owned(),
+            node_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        }];
+
+        assert_eq!(merge_discovered_peers(&mut config, &nodes), 1);
+        assert_eq!(merge_discovered_peers(&mut config, &nodes), 0);
+        assert_eq!(
+            config.peers,
+            vec![FilePeer {
+                node_url: "https://node-b.internal".to_owned(),
+                node_id: Some(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()
+                ),
+                trusted: false,
+                source: "discovery".to_owned(),
+            }]
         );
     }
 

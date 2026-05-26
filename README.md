@@ -17,6 +17,7 @@ Not production-ready yet. Client tokens, invites, peers and audit events are per
 Use the `hive` CLI to configure a team node, save, find and retrieve shared team memory:
 
 ```bash
+hive setup
 hive discover
 hive init --node-url http://127.0.0.1:7747 --token-file ./data/api.token
 hive remember "Replay failed Stripe webhooks before retrying invoices." --tag billing --tag stripe
