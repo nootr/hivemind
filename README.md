@@ -24,11 +24,11 @@ curl -fsSL https://raw.githubusercontent.com/nootr/hivemind/main/install.sh | sh
 
 Review `install.sh` first if you prefer. It uses `cargo install --git`, so Rust/Cargo is required.
 
-Create local node config and start the node:
+Create local node config and start the node. The config omits `public_url` by default; the running node detects and advertises the current LAN URL dynamically:
 
 ```bash
 hive node init
-hivemind-node --config ~/.hivemind/node.toml
+hive node start
 ```
 
 In another shell:

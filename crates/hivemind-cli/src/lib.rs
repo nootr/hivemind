@@ -5,6 +5,7 @@ use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
+    process::{Command as ProcessCommand, Stdio},
     time::Duration,
 };
 
@@ -61,10 +62,16 @@ pub enum NodeCommand {
         data_dir: Option<PathBuf>,
         #[arg(long, default_value = "0.0.0.0:7747")]
         bind_addr: String,
-        #[arg(long, default_value = "http://127.0.0.1:7747")]
-        public_url: String,
+        #[arg(long)]
+        public_url: Option<String>,
         #[arg(long)]
         force: bool,
+    },
+    Start {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        log: Option<PathBuf>,
     },
 }
 
@@ -129,7 +136,8 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
                 bind_addr,
                 public_url,
                 force,
-            } => node_init(config, data_dir, &bind_addr, &public_url, force),
+            } => node_init(config, data_dir, &bind_addr, public_url.as_deref(), force),
+            NodeCommand::Start { config, log } => node_start(config, log),
         },
         Command::Join { node_url } => join(client, &node_url).await,
         Command::Peer { command } => match command {
@@ -149,7 +157,7 @@ fn node_init(
     config: Option<PathBuf>,
     data_dir: Option<PathBuf>,
     bind_addr: &str,
-    public_url: &str,
+    public_url: Option<&str>,
     force: bool,
 ) -> Result<String, CliError> {
     let (config, data_dir) = match (config, data_dir) {
@@ -175,13 +183,16 @@ fn node_init(
         fs::create_dir_all(parent)?;
     }
     fs::create_dir_all(&data_dir)?;
+    let public_url_line = public_url
+        .map(|url| format!("public_url = \"{}\"\n", toml_escape(url)))
+        .unwrap_or_default();
     fs::write(
         &config,
         format!(
-            "data_dir = \"{}\"\nbind_addr = \"{}\"\npublic_url = \"{}\"\n",
+            "data_dir = \"{}\"\nbind_addr = \"{}\"\n{}",
             toml_escape_path(&data_dir),
             toml_escape(bind_addr),
-            toml_escape(public_url)
+            public_url_line
         ),
     )?;
 
@@ -189,6 +200,33 @@ fn node_init(
         "wrote node config: {}\nstart node:\n  hivemind-node --config {}\nthen run:\n  hive setup",
         config.display(),
         config.display()
+    ))
+}
+
+fn node_start(config: Option<PathBuf>, log: Option<PathBuf>) -> Result<String, CliError> {
+    let home = home_dir()?;
+    let config = config.unwrap_or_else(|| home.join(".hivemind/node.toml"));
+    let log = log.unwrap_or_else(|| home.join(".hivemind/node.log"));
+    if let Some(parent) = log.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)?;
+    let stderr = stdout.try_clone()?;
+    let child = ProcessCommand::new("hivemind-node")
+        .arg("--config")
+        .arg(&config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()?;
+    Ok(format!(
+        "started hivemind-node pid {}\nconfig: {}\nlog: {}\nthen run:\n  hive setup",
+        child.id(),
+        config.display(),
+        log.display()
     ))
 }
 
@@ -431,9 +469,7 @@ fn now_ms() -> u64 {
 pub fn write_example_config(path: &PathBuf, port: u16) -> Result<(), CliError> {
     fs::write(
         path,
-        format!(
-            "data_dir = \"./data-{port}\"\nbind_addr = \"0.0.0.0:{port}\"\npublic_url = \"http://127.0.0.1:{port}\"\n"
-        ),
+        format!("data_dir = \"./data-{port}\"\nbind_addr = \"0.0.0.0:{port}\"\n"),
     )?;
     Ok(())
 }
@@ -482,8 +518,31 @@ mod tests {
                         config: None,
                         data_dir: None,
                         bind_addr: "0.0.0.0:7747".to_owned(),
-                        public_url: "http://127.0.0.1:18888".to_owned(),
+                        public_url: Some("http://127.0.0.1:18888".to_owned()),
                         force: false,
+                    }
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_node_start() {
+        assert_eq!(
+            Cli::parse_from([
+                "hive",
+                "node",
+                "start",
+                "--config",
+                "/tmp/node.toml",
+                "--log",
+                "/tmp/node.log"
+            ]),
+            Cli {
+                command: Command::Node {
+                    command: NodeCommand::Start {
+                        config: Some(PathBuf::from("/tmp/node.toml")),
+                        log: Some(PathBuf::from("/tmp/node.log")),
                     }
                 }
             }
@@ -499,7 +558,7 @@ mod tests {
             Some(config.clone()),
             Some(data_dir.clone()),
             "127.0.0.1:18888",
-            "http://127.0.0.1:18888",
+            Some("http://127.0.0.1:18888"),
             false,
         )
         .unwrap();
@@ -508,6 +567,23 @@ mod tests {
         assert!(written.contains(&format!("data_dir = \"{}\"", data_dir.display())));
         assert!(written.contains("bind_addr = \"127.0.0.1:18888\""));
         assert!(written.contains("public_url = \"http://127.0.0.1:18888\""));
+    }
+
+    #[test]
+    fn node_init_omits_public_url_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("node.toml");
+        let data_dir = dir.path().join("data");
+        node_init(
+            Some(config.clone()),
+            Some(data_dir),
+            "127.0.0.1:18888",
+            None,
+            false,
+        )
+        .unwrap();
+        let written = fs::read_to_string(config).unwrap();
+        assert!(!written.contains("public_url ="));
     }
 
     #[test]

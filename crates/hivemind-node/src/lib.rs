@@ -75,7 +75,8 @@ impl IntoResponse for ApiError {
 #[derive(Clone)]
 pub struct AppState {
     key: Arc<NodeKey>,
-    node_url: String,
+    bind_addr: SocketAddr,
+    public_url: Option<String>,
     store: Arc<Store>,
 }
 
@@ -124,20 +125,25 @@ fn default_room() -> String {
 pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
     fs::create_dir_all(&config.data_dir)?;
     let key = load_or_create_key(&config.data_dir.join("node.key"))?;
-    let node_url = config
-        .public_url
-        .clone()
-        .unwrap_or_else(|| local_node_url(config.bind_addr));
     let store = Arc::new(Store::default());
     let state = AppState {
         key: Arc::new(key),
-        node_url,
+        bind_addr: config.bind_addr,
+        public_url: config.public_url.clone(),
         store,
     };
 
     spawn_discovery(config.bind_addr, config.public_url, state.clone());
     serve(config.bind_addr, app(state)).await?;
     Ok(())
+}
+
+impl AppState {
+    fn node_url(&self) -> String {
+        self.public_url
+            .clone()
+            .unwrap_or_else(|| local_node_url(self.bind_addr))
+    }
 }
 
 pub fn app(state: AppState) -> Router {
@@ -154,7 +160,7 @@ pub fn app(state: AppState) -> Router {
 
 async fn get_node(State(state): State<AppState>) -> Json<NodeInfoResponse> {
     Json(NodeInfoResponse {
-        node_url: state.node_url,
+        node_url: state.node_url(),
         node_id: state.key.node_id(),
     })
 }
@@ -213,7 +219,7 @@ async fn join_network(
         .cloned()
         .collect();
     peers.push(PeerRecord {
-        node_url: state.node_url.clone(),
+        node_url: state.node_url(),
         node_id: state.key.node_id(),
         trusted: false,
         source: "self".to_owned(),
@@ -578,12 +584,28 @@ fn restrict_key_permissions(_path: &FsPath) -> std::io::Result<()> {
 }
 
 fn local_node_url(bind_addr: SocketAddr) -> String {
-    let host = if bind_addr.ip().is_unspecified() {
-        "127.0.0.1".to_owned()
+    format!(
+        "http://{}:{}",
+        public_host(bind_addr.ip()),
+        bind_addr.port()
+    )
+}
+
+fn public_host(bind_ip: IpAddr) -> String {
+    let ip = if bind_ip.is_unspecified() {
+        default_lan_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
     } else {
-        bind_addr.ip().to_string()
+        bind_ip
     };
-    format!("http://{host}:{}", bind_addr.port())
+    match ip {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    }
+}
+
+fn default_lan_ip() -> Option<IpAddr> {
+    outbound_ip_for(SocketAddr::from((Ipv4Addr::new(1, 1, 1, 1), 80)))
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
 }
 
 async fn serve(bind_addr: SocketAddr, router: Router) -> std::io::Result<()> {
@@ -604,9 +626,27 @@ mod tests {
     fn test_state() -> AppState {
         AppState {
             key: Arc::new(NodeKey::from_seed_hex(&"01".repeat(32)).unwrap()),
-            node_url: "http://127.0.0.1:7747".to_owned(),
+            bind_addr: "127.0.0.1:7747".parse().unwrap(),
+            public_url: Some("http://127.0.0.1:7747".to_owned()),
             store: Arc::new(Store::default()),
         }
+    }
+
+    #[test]
+    fn node_url_uses_configured_public_url() {
+        let state = test_state();
+        assert_eq!(state.node_url(), "http://127.0.0.1:7747");
+    }
+
+    #[test]
+    fn node_url_is_computed_at_runtime_without_public_url() {
+        let state = AppState {
+            key: Arc::new(NodeKey::from_seed_hex(&"01".repeat(32)).unwrap()),
+            bind_addr: "127.0.0.1:18888".parse().unwrap(),
+            public_url: None,
+            store: Arc::new(Store::default()),
+        };
+        assert_eq!(state.node_url(), "http://127.0.0.1:18888");
     }
 
     #[test]
