@@ -25,11 +25,13 @@ Initialize local node config:
 hive node init
 ```
 
-Ask the user to start the node:
+Start the node yourself:
 
 ```bash
-hivemind-node --config ~/.hivemind/node.toml
+hive node start
 ```
+
+Add persistent project instructions in the way this agent environment expects, usually by updating `AGENTS.md`, so future agent sessions keep polling Hive. Include the chat polling and trust rules from this skill.
 
 Then run:
 

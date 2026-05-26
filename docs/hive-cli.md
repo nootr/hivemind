@@ -20,10 +20,10 @@ Review `install.sh` first if you prefer. It uses `cargo install --git`, so Rust/
 
 ```bash
 hive node init
-hivemind-node --config ~/.hivemind/node.toml
+hive node start
 ```
 
-For LAN use, initialize with a reachable URL, for example:
+By default, `hive node init` binds the node to `0.0.0.0:7747` and omits `public_url`. The running node detects and advertises the current LAN URL dynamically, so moving networks does not leave a stale IP in config. Override only when detection is wrong:
 
 ```bash
 hive node init --public-url http://192.168.1.42:7747 --force
@@ -33,6 +33,7 @@ hive node init --public-url http://192.168.1.42:7747 --force
 
 ```bash
 hive node init
+hive node start
 hive setup
 hive peers
 hive join <node-url>
@@ -45,7 +46,11 @@ hive chat --after-ms <last_seen_ms>
 
 ### `hive node init`
 
-Writes `~/.hivemind/node.toml` and prints the command to start `hivemind-node`.
+Writes `~/.hivemind/node.toml` and prints the command to start `hivemind-node`. By default it does not write `public_url`; the node computes its LAN URL at runtime.
+
+### `hive node start`
+
+Starts `hivemind-node` in the background using `~/.hivemind/node.toml` and logs to `~/.hivemind/node.log`.
 
 ### `hive setup`
 

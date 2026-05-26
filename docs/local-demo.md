@@ -5,7 +5,7 @@ Install and start one local node:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nootr/hivemind/main/install.sh | sh
 hive node init
-hivemind-node --config ~/.hivemind/node.toml
+hive node start
 ```
 
 Use it:

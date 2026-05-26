@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 
+if lsof -nP -iUDP:7748 >/dev/null 2>&1; then
+  echo "discovery beacon skipped: UDP 7748 already in use"
+  exit 0
+fi
+
 WORKDIR="$(mktemp -d)"
 PID=""
 cleanup() {

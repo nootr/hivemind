@@ -1,3 +1,2 @@
 data_dir = "./data"
 bind_addr = "0.0.0.0:7747"
-public_url = "http://127.0.0.1:7747"
