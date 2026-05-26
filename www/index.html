@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>HIVEMIND — /hive memory for AI agents</title>
-  <meta name="description" content="Install the /hive skill and give your AI agents shared, reusable memory across projects, teams and nodes.">
+  <title>HIVEMIND — team memory for AI agents</title>
+  <meta name="description" content="Run a team-owned HIVEMIND node, install the /hive skill and give your AI agents shared, reusable team memory.">
   <style>
     :root {
       color-scheme: dark;
@@ -324,6 +324,34 @@
       font-weight: 900;
     }
 
+    .copy-button {
+      min-height: 30px;
+      padding: 0 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      background: rgba(255,255,255,.08);
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      font-size: .78rem;
+      font-weight: 800;
+    }
+
+    .copy-button:hover { border-color: rgba(120, 242, 189, .5); }
+
+    .copy-prompt {
+      width: 100%;
+      min-height: 128px;
+      margin-top: 10px;
+      padding: 13px 14px;
+      resize: vertical;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(5, 8, 19, .72);
+      color: #dbeafe;
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
     .quote {
       padding: 28px;
       border: 1px solid rgba(120, 242, 189, .24);
@@ -419,10 +447,9 @@
         HIVEMIND
       </a>
       <nav class="links">
-        <a href="#skill">/hive skill</a>
         <a href="#quickstart">Quickstart</a>
         <a href="#teams">Teams</a>
-        <a href="#operators">Node owners</a>
+        <a href="#operators">Team nodes</a>
         <a href="https://github.com/nootr/hivemind">GitHub</a>
       </nav>
     </header>
@@ -430,19 +457,18 @@
     <main id="top">
       <section class="hero" aria-labelledby="hero-title">
         <div>
-          <div class="eyebrow">The /hive skill for shared agent memory</div>
-          <h1 id="hero-title">Teach once. Reuse everywhere.</h1>
-          <p class="lead">HIVEMIND gives your AI agents a shared memory they can write to, search and reuse. Install the <strong>/hive</strong> skill once; agents then check relevant memory and publish new learnings automatically.</p>
+          <div class="eyebrow">The /hive skill for team memory</div>
+          <h1 id="hero-title">Teach once. Reuse as a team.</h1>
+          <p class="lead">HIVEMIND gives your team's AI agents shared memory they can write to, search and reuse. Run a local or private team node, connect with <strong>hive init</strong> or <strong>hive join</strong>, and let agents carry durable learnings into future work.</p>
           <div class="actions">
             <a class="button primary" href="#quickstart">Set up /hive</a>
-            <a class="button" href="#skill">See the two-minute demo</a>
           </div>
         </div>
 
-        <aside id="skill" class="panel terminal" aria-label="Two-minute hive skill demo">
+        <aside id="skill" class="panel terminal" aria-label="Hive skill demo">
           <div class="terminal-head">
             <div class="dots" aria-hidden="true"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
-            <span>two-minute /hive demo</span>
+            <span>/hive demo</span>
           </div>
           <pre><code id="hive-demo" aria-live="polite"></code><span class="cursor" aria-hidden="true"></span></pre>
         </aside>
@@ -451,7 +477,7 @@
       <section class="section" aria-labelledby="value-title">
         <div class="section-head">
           <h2 id="value-title">Memory that behaves like a team asset.</h2>
-          <p>Agents stop relearning the same facts in every chat. Your best fixes, decisions and procedures become searchable memory objects that travel across tools, teammates and nodes.</p>
+          <p>Agents stop relearning the same facts in every chat. Your best fixes, decisions and procedures become searchable memory objects for your team's tools, teammates and trusted nodes.</p>
         </div>
         <div class="workflow">
           <article class="card">
@@ -472,7 +498,7 @@
           <article class="card">
             <div class="label">Share</div>
             <h3>Move verified memory</h3>
-            <p>Send signed memory between nodes so another agent can trust what it imports.</p>
+            <p>Move signed memory between trusted team nodes so another agent can verify what it imports.</p>
           </article>
         </div>
       </section>
@@ -480,32 +506,34 @@
       <section id="quickstart" class="section" aria-labelledby="quickstart-title">
         <div class="split">
           <div class="section-head">
-            <h2 id="quickstart-title">Quickstart: add shared memory to your agent.</h2>
-            <p>Enable the /hive skill once. After that, your agent checks relevant memory before work starts and saves useful learnings when the task is done.</p>
+            <h2 id="quickstart-title">Quickstart: set up /hive.</h2>
+            <p>Start by giving your agent a setup prompt. The agent discovers local Hive nodes, joins or initializes the right node, and asks before trusting unknown peers.</p>
           </div>
           <div class="steps">
             <div class="step">
               <div>
-                <h3>Add /hive to your agent</h3>
-                <p class="muted">Install the HIVEMIND skill in your AI workspace and connect it to your memory account.</p>
+                <h3>Copy one setup prompt into your agent</h3>
+                <p class="muted">This lets the agent discover local nodes, join or initialize Hive, and ask before trusting peers.</p>
+                <textarea id="prompt-setup" class="copy-prompt" readonly onclick="this.select()">Please set up /hive for this repository. Use the HIVEMIND project at https://github.com/nootr/hivemind. Run hive setup first. If no node is configured and I want this as the first node, use node.toml or examples/local-node.toml, bind the node to 0.0.0.0:7747 for LAN discovery, start hivemind-node, then run hive init with ./data/api.token. If a team node is discovered, show me its node URL and node ID/fingerprint and ask before trusting it. Do not trust unknown peer node IDs automatically; ask me before running hive peer trust. Save a bootstrap memory when Hive is ready.</textarea>
+                <button class="copy-button" type="button" data-copy="prompt-setup">Copy setup prompt</button>
               </div>
             </div>
             <div class="step">
               <div>
-                <h3>Save your first memory</h3>
-                <p class="muted"><code>/hive remember</code> captures the answer, rule, fix or procedure you want future agents to reuse.</p>
+                <h3>Agent connects to nodes</h3>
+                <p class="muted">The agent runs <code>hive discover</code>, connects to the right node, and keeps discovered peers untrusted until you approve them.</p>
               </div>
             </div>
             <div class="step">
               <div>
-                <h3>Let the agent check memory</h3>
-                <p class="muted">Before a task starts, the skill searches for relevant team memory and loads it into context.</p>
+                <h3>Agent checks memory</h3>
+                <p class="muted">Before work starts, the agent searches relevant team memory with <code>hive find</code> and loads it with <code>hive use</code>.</p>
               </div>
             </div>
             <div class="step">
               <div>
-                <h3>Publish useful learnings</h3>
-                <p class="muted">When the task reveals a reusable fix, rule or decision, the agent saves it back to /hive.</p>
+                <h3>Agent saves learnings</h3>
+                <p class="muted">After useful discoveries, the agent saves durable team knowledge with <code>hive remember</code>. Sharing access remains explicit via <code>hive share</code>.</p>
               </div>
             </div>
           </div>
@@ -515,13 +543,13 @@
       <section id="teams" class="section" aria-labelledby="people-title">
         <div class="section-head">
           <h2 id="people-title">For every role around AI work.</h2>
-          <p>The same shared memory layer helps individual agent users, product teams, developers and infrastructure operators.</p>
+          <p>The same team memory layer helps agent users, product teams, developers and workspace admins.</p>
         </div>
         <div class="grid two">
           <article class="card">
             <div class="label">Agent users</div>
             <h3>Stop repeating yourself</h3>
-            <p>Save the context your agent keeps asking for: repo rules, project decisions, customer details, runbooks and known fixes.</p>
+            <p>Save the context your agent keeps asking for: repo rules, project decisions, runbooks and known fixes. Keep secrets and sensitive customer data out.</p>
           </article>
           <article class="card">
             <div class="label">AI product teams</div>
@@ -580,15 +608,15 @@
       <section id="operators" class="section" aria-labelledby="operator-title">
         <div class="grid two">
           <article class="card operator">
-            <div class="label">Node owners</div>
-            <h2 id="operator-title">Run memory capacity, not proof-of-work.</h2>
-            <p>Node owners store and serve verified memory for the network. Rewards are tied to useful storage and availability, backed by proof-of-stake accountability instead of wasteful mining.</p>
+            <div class="label">Team nodes</div>
+            <h2 id="operator-title">Run memory where your team works.</h2>
+            <p>A HIVEMIND node is a local or private service for team memory. It stores verified objects, serves the CLI and API, issues short-lived join invites, and can later sync with allowlisted trusted peers.</p>
           </article>
           <article class="card">
-            <div class="label">Why users care</div>
-            <h2>More nodes means better shared memory.</h2>
+            <div class="label">Why teams care</div>
+            <h2>Private nodes make memory operational.</h2>
             <ul class="status-list">
-              <li>More availability for public and team memory</li>
+              <li>Team-owned deployment boundaries</li>
               <li>Content-addressed storage with integrity checks</li>
               <li>Signed provenance for imported memory</li>
               <li>Portable memory objects that are not trapped in one app</li>
@@ -601,7 +629,7 @@
         <div class="callout">
           <div>
             <h2 id="cta-title">Start with one command.</h2>
-            <p class="muted">Install /hive, save the memory your agent should not forget, and reuse it in the next task.</p>
+            <p class="muted">Connect /hive to a team node with <code>hive init</code> or <code>hive join</code>, save the memory your agents should not forget, and reuse it in the next task.</p>
           </div>
           <div class="actions">
             <a class="button primary" href="#quickstart">Set up /hive</a>
@@ -612,8 +640,8 @@
     </main>
 
     <footer>
-      <span>HIVEMIND gives AI agents shared, reusable memory.</span>
-      <span><a href="https://github.com/nootr/hivemind">GitHub</a> · <a href="#skill">/hive demo</a></span>
+      <span>HIVEMIND gives teams shared, reusable memory for AI agents.</span>
+      <span><a href="https://github.com/nootr/hivemind">GitHub</a></span>
     </footer>
   </div>
   <script>
@@ -622,21 +650,21 @@
     const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     const script = [
-      [{ className: "prompt", text: "> " }, { text: "Please set up the " }, { className: "cmd", text: "/hive" }, { text: " skill from nootr.github.io/hivemind." }],
+      [{ className: "prompt", text: "> " }, { className: "cmd", text: "[Pasted /hive setup prompt]" }],
       [{ text: "\n\n" }],
-      [{ className: "thinking", text: "Setting up /hive…\nConnecting to HIVEMIND memory…" }],
+      [{ className: "thinking", text: "hive discover\nFound: https://hive.team.internal\nAsk teammate/admin for an invite\nhive join 'hive://join?node=https%3A%2F%2Fhive.team.internal&invite=...'\nhive peers" }],
       [{ text: "\n" }],
-      [{ className: "answer", text: "Done. I’ll automatically check shared memory when it can help." }],
+      [{ className: "answer", text: "Connected to the team node. I found peer candidates, but they stay untrusted until you approve them." }],
       [{ text: "\n\n" }],
       [{ className: "prompt", text: "> " }, { text: "Fix the billing worker so invoice retries stop failing." }],
       [{ text: "\n\n" }],
-      [{ className: "thinking", text: "Checking /hive for billing, stripe and worker context…" }],
+      [{ className: "thinking", text: "hive find billing\nhive use <stripe-webhook-runbook-id>" }],
       [{ text: "\n" }],
       [{ className: "answer", text: "Found: “Stripe webhook replay runbook”.\nI’ll replay failed webhooks before retrying invoices." }],
       [{ text: "\n\n" }],
-      [{ className: "thinking", text: "After the fix: publishing the new learning back to /hive…" }],
+      [{ className: "thinking", text: "hive remember 'Verify Stripe webhook idempotency before replay.' --tag billing --tag stripe --tag runbook" }],
       [{ text: "\n" }],
-      [{ className: "answer", text: "Saved: “Verify Stripe webhook idempotency before replay”.\nFuture agents can reuse it automatically." }]
+      [{ className: "answer", text: "Saved a reusable team memory. Future agents can find it automatically." }]
     ];
 
     function appendText(text, className) {
@@ -664,6 +692,26 @@
         await new Promise(resolve => setTimeout(resolve, 260));
       }
     }
+
+    async function copyPrompt(button) {
+      const target = document.getElementById(button.dataset.copy);
+      if (!target) return;
+
+      target.select();
+      try {
+        await navigator.clipboard.writeText(target.value);
+      } catch (_) {
+        document.execCommand("copy");
+      }
+
+      const original = button.textContent;
+      button.textContent = "Copied";
+      setTimeout(() => { button.textContent = original; }, 1400);
+    }
+
+    document.querySelectorAll("[data-copy]").forEach(button => {
+      button.addEventListener("click", () => copyPrompt(button));
+    });
 
     if (demo) {
       if (prefersReducedMotion) renderFull();

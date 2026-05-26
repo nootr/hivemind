@@ -17,7 +17,10 @@ After that, every `git commit` runs:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+for test_script in ./e2e-tests/*.sh; do "$test_script"; done
 ```
+
+GitHub Actions runs the same hook in CI, so the E2E shell tests are part of pull-request validation.
 
 To run the same checks manually:
 

@@ -4,6 +4,8 @@ dir = "./data"
 [api]
 bind_addr = "127.0.0.1:7747"
 auth_token_file = "./data/api.token"
+# Optional. Set this when sharing on a private network/gateway.
+# public_url = "https://hive.your-team.internal"
 
 [identity]
 agent_key_path = "./data/agent.ed25519"

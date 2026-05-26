@@ -1,6 +1,6 @@
 # Local demo
 
-Run a single local HIVEMIND node and exercise the first shared-memory flow:
+Run a single local HIVEMIND team node and exercise the first team-memory flow:
 
 1. publish a memory object
 2. retrieve it by object ID
@@ -9,6 +9,7 @@ Run a single local HIVEMIND node and exercise the first shared-memory flow:
 5. find objects that reference it
 6. retrieve chunk bytes by chunk ID
 7. import transferred chunks and envelopes
+8. create and exchange a short-lived join invite
 
 ## Start a node
 
@@ -28,7 +29,8 @@ On first start, the node creates:
 
 - `./data/api.token` — bearer token for `/v1/*`
 - `./data/agent.ed25519` — local agent signing seed
-- `./data/metadata.sqlite3` — local metadata index
+- `./data/metadata.sqlite3` — local memory metadata index
+- `./data/state.sqlite3` — client token, invite, peer/trust and audit state
 - content-addressed object/chunk files under `./data`
 
 `/health` is unauthenticated. `/v1/*` requires bearer auth.
@@ -87,7 +89,7 @@ The response includes the base64 payload, tags, references and `verified: true`.
 
 ## Export the signed envelope
 
-For node-to-node transfer, export the canonical signed object envelope without assembling payload bytes:
+For trusted team-node transfer, export the canonical signed object envelope without assembling payload bytes:
 
 ```bash
 curl -sS \
@@ -185,10 +187,53 @@ For chunked objects, import required chunks before importing the envelope. If ch
 
 Envelope import verifies the signature and records local metadata/tag/reference indexes.
 
-## Smoke test
+## Discover a local node
+
+Nodes answer local UDP discovery on port `7748`:
+
+```bash
+hive discover
+```
+
+Discovery helps when local IPs change. It only returns candidate node URLs; joining still requires an invite.
+
+## Create a join invite
+
+For a reachable private node, create a short-lived invite code:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"node_url":"http://127.0.0.1:7747","ttl_seconds":86400,"uses":1}' \
+  http://127.0.0.1:7747/v1/invites
+```
+
+Exchange the invite code for local client config data:
+
+```bash
+curl -sS \
+  -H "Content-Type: application/json" \
+  -d '{"invite_code":"<invite code>"}' \
+  http://127.0.0.1:7747/v1/join
+```
+
+Invite links contain short-lived codes, not admin API tokens. Join returns a generated client token with expiry and `memory:read memory:write memory:import` scopes. Admins can revoke generated client tokens through `POST /v1/client-tokens/{token}/revoke` and inspect security events through `GET /v1/audit`. Join responses may include peer candidates; clients must keep them untrusted until a user explicitly trusts them.
+
+A node admin can register a peer candidate on a running node:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"node_url":"http://127.0.0.1:7748","trusted":false}' \
+  http://127.0.0.1:7747/v1/peers
+```
+
+## E2E test
 
 Run the full local demo automatically:
 
 ```bash
-scripts/local-demo.sh
+e2e-tests/local-demo.sh
 ```

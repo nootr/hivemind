@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -17,9 +17,16 @@ use hivemind_core::{ChunkId, ObjectEnvelope, ObjectId, ObjectKind, Payload};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::state::{
+    AuditEvent, ConsumedInvite, NodeStateStoreError, SqliteNodeStateStore,
+    CLIENT_TOKEN_SCOPE_MEMORY_IMPORT, CLIENT_TOKEN_SCOPE_MEMORY_READ,
+    CLIENT_TOKEN_SCOPE_MEMORY_WRITE, DEFAULT_CLIENT_TOKEN_SCOPES, DEFAULT_CLIENT_TOKEN_TTL_MS,
+};
+
 #[derive(Clone, Debug)]
 pub struct ApiConfig {
-    pub bearer_token: String,
+    pub admin_token: String,
+    pub state_store: Arc<SqliteNodeStateStore>,
 }
 
 #[derive(Clone)]
@@ -29,6 +36,20 @@ pub struct AppState {
     pub content_store: Arc<FsContentStore>,
     pub metadata_store: Arc<SqliteMetadataStore>,
     pub config: ApiConfig,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InviteRecord {
+    pub node_url: String,
+    pub expires_at_ms: u64,
+    pub uses_remaining: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerRecord {
+    pub node_url: String,
+    pub node_id: String,
+    pub trusted: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,11 +109,101 @@ pub struct PutChunkRequest {
     pub bytes_base64: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SyncPullRequest {
+    pub peer_node_id: String,
+    pub peer_api_token: String,
+    pub tag: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct SyncPullResponse {
+    pub peer_node_id: String,
+    pub tag: String,
+    pub scanned_objects: u32,
+    pub imported_objects: u32,
+    pub skipped_objects: u32,
+    pub imported_chunks: u32,
+}
+
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct PutChunkResponse {
     pub chunk_id: String,
     pub size: u64,
     pub verified: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateInviteRequest {
+    pub node_url: String,
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
+    #[serde(default)]
+    pub uses: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct CreateInviteResponse {
+    pub invite_code: String,
+    pub invite_url: String,
+    pub node_url: String,
+    pub expires_at_ms: u64,
+    pub uses_remaining: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JoinInviteRequest {
+    pub invite_code: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct JoinInviteResponse {
+    pub node_url: String,
+    pub api_token: String,
+    pub api_token_expires_at_ms: u64,
+    pub api_token_scope: String,
+    pub peers: Vec<PeerSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertPeerRequest {
+    pub node_url: String,
+    pub node_id: String,
+    #[serde(default)]
+    pub trusted: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct UpsertPeerResponse {
+    pub peer: PeerSummary,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct PeerListResponse {
+    pub peers: Vec<PeerSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct RevokeClientTokenResponse {
+    pub revoked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuditLogQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct AuditLogResponse {
+    pub events: Vec<AuditEvent>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
+pub struct PeerSummary {
+    pub node_url: String,
+    pub node_id: String,
+    pub trusted: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -202,6 +313,24 @@ pub enum ApiError {
     #[error("invalid object envelope")]
     InvalidObjectEnvelope,
 
+    #[error("invalid invite")]
+    InvalidInvite,
+
+    #[error("invalid client token")]
+    InvalidClientToken,
+
+    #[error("peer is not trusted")]
+    PeerNotTrusted,
+
+    #[error("sync failed: {0}")]
+    Sync(String),
+
+    #[error("invite not found")]
+    InviteNotFound,
+
+    #[error("invite expired")]
+    InviteExpired,
+
     #[error("object envelope references missing chunks")]
     MissingObjectChunks { chunk_ids: Vec<String> },
 
@@ -233,11 +362,18 @@ impl ApiError {
             | ApiError::InvalidChunkId
             | ApiError::InvalidChunkContent
             | ApiError::InvalidObjectEnvelope
+            | ApiError::InvalidInvite
+            | ApiError::InvalidClientToken
             | ApiError::InvalidBase64 => StatusCode::BAD_REQUEST,
+            ApiError::PeerNotTrusted => StatusCode::FORBIDDEN,
             ApiError::MissingObjectChunks { .. } | ApiError::ContentConflict => {
                 StatusCode::CONFLICT
             }
-            ApiError::ObjectNotFound | ApiError::ChunkNotFound => StatusCode::NOT_FOUND,
+            ApiError::ObjectNotFound | ApiError::ChunkNotFound | ApiError::InviteNotFound => {
+                StatusCode::NOT_FOUND
+            }
+            ApiError::InviteExpired => StatusCode::GONE,
+            ApiError::Sync(_) => StatusCode::BAD_GATEWAY,
             ApiError::App(_) | ApiError::Metadata(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -250,6 +386,12 @@ impl ApiError {
             ApiError::InvalidChunkId => "invalid_chunk_id",
             ApiError::InvalidChunkContent => "invalid_chunk_content",
             ApiError::InvalidObjectEnvelope => "invalid_object_envelope",
+            ApiError::InvalidInvite => "invalid_invite",
+            ApiError::InvalidClientToken => "invalid_client_token",
+            ApiError::PeerNotTrusted => "peer_not_trusted",
+            ApiError::Sync(_) => "sync_failed",
+            ApiError::InviteNotFound => "invite_not_found",
+            ApiError::InviteExpired => "invite_expired",
             ApiError::MissingObjectChunks { .. } => "missing_object_chunks",
             ApiError::ContentConflict => "content_conflict",
             ApiError::ObjectNotFound => "object_not_found",
@@ -293,25 +435,89 @@ impl IntoResponse for ApiError {
 
 pub fn app(state: AppState) -> Router {
     let protected_routes = Router::new()
-        .route("/v1/objects", post(publish_object))
-        .route("/v1/objects/envelope", post(import_object_envelope))
+        .route(
+            "/v1/objects",
+            post(publish_object).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_WRITE),
+                require_any_auth,
+            )),
+        )
+        .route(
+            "/v1/objects/envelope",
+            post(import_object_envelope).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_IMPORT),
+                require_any_auth,
+            )),
+        )
         .route(
             "/v1/objects/envelope/plan",
-            post(plan_object_envelope_import),
+            post(plan_object_envelope_import).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_IMPORT),
+                require_any_auth,
+            )),
         )
-        .route("/v1/objects/{object_id}", get(get_object))
-        .route("/v1/objects/{object_id}/envelope", get(get_object_envelope))
-        .route("/v1/objects/{object_id}/referrers", get(get_referrers))
-        .route("/v1/chunks/{chunk_id}", get(get_chunk).put(put_chunk))
-        .route("/v1/tags/{tag}", get(get_tag))
+        .route(
+            "/v1/objects/{object_id}",
+            get(get_object).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_READ),
+                require_any_auth,
+            )),
+        )
+        .route(
+            "/v1/objects/{object_id}/envelope",
+            get(get_object_envelope).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_READ),
+                require_any_auth,
+            )),
+        )
+        .route(
+            "/v1/objects/{object_id}/referrers",
+            get(get_referrers).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_READ),
+                require_any_auth,
+            )),
+        )
+        .route(
+            "/v1/chunks/{chunk_id}",
+            get(get_chunk)
+                .route_layer(middleware::from_fn_with_state(
+                    AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_READ),
+                    require_any_auth,
+                ))
+                .put(put_chunk)
+                .layer(middleware::from_fn_with_state(
+                    AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_IMPORT),
+                    require_any_auth,
+                )),
+        )
+        .route(
+            "/v1/tags/{tag}",
+            get(get_tag).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_READ),
+                require_any_auth,
+            )),
+        );
+
+    let admin_routes = Router::new()
+        .route("/v1/audit", get(get_audit_log))
+        .route("/v1/sync/pull", post(sync_pull))
+        .route("/v1/invites", post(create_invite))
+        .route("/v1/peers", get(get_peers).post(upsert_peer))
+        .route(
+            "/v1/client-tokens/{token}/revoke",
+            post(revoke_client_token),
+        )
         .route_layer(middleware::from_fn_with_state(
-            state.config.clone(),
-            require_bearer_auth,
+            state.clone(),
+            require_admin_auth,
         ));
 
     Router::new()
         .route("/health", get(health))
+        .route("/v1/discovery/peers", get(get_discovery_peers))
+        .route("/v1/join", post(join_invite))
         .merge(protected_routes)
+        .merge(admin_routes)
         .with_state(state)
 }
 
@@ -319,23 +525,345 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn require_bearer_auth(
-    State(config): State<ApiConfig>,
+async fn get_discovery_peers(
+    State(state): State<AppState>,
+) -> Result<Json<PeerListResponse>, ApiError> {
+    Ok(Json(PeerListResponse {
+        peers: peer_summaries(&state, false)?,
+    }))
+}
+
+async fn require_admin_auth(
+    State(state): State<AppState>,
     headers: HeaderMap,
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let expected = format!("Bearer {}", config.bearer_token);
-    let authorized = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == expected);
-
-    if !authorized {
+    if !has_admin_auth(&state.config, &headers) {
         return Err(ApiError::Unauthorized);
     }
 
     Ok(next.run(request).await)
+}
+
+#[derive(Clone)]
+struct AuthzState {
+    app: AppState,
+    required_scope: &'static str,
+}
+
+impl AuthzState {
+    fn new(app: AppState, required_scope: &'static str) -> Self {
+        Self {
+            app,
+            required_scope,
+        }
+    }
+}
+
+async fn require_any_auth(
+    State(authz): State<AuthzState>,
+    headers: HeaderMap,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if !has_admin_auth(&authz.app.config, &headers) && !has_client_auth(&authz, &headers).await? {
+        return Err(ApiError::Unauthorized);
+    }
+
+    Ok(next.run(request).await)
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
+
+fn has_admin_auth(config: &ApiConfig, headers: &HeaderMap) -> bool {
+    bearer_token(headers).is_some_and(|token| token == config.admin_token)
+}
+
+async fn has_client_auth(authz: &AuthzState, headers: &HeaderMap) -> Result<bool, ApiError> {
+    let Some(token) = bearer_token(headers) else {
+        return Ok(false);
+    };
+    let now_ms = authz.app.clock.now_ms().await.map_err(app_error)?;
+    authz
+        .app
+        .config
+        .state_store
+        .has_client_token(token, now_ms, authz.required_scope)
+        .map_err(state_error)
+}
+
+async fn get_peers(State(state): State<AppState>) -> Result<Json<PeerListResponse>, ApiError> {
+    Ok(Json(PeerListResponse {
+        peers: peer_summaries(&state, true)?,
+    }))
+}
+
+async fn get_audit_log(
+    State(state): State<AppState>,
+    Query(query): Query<AuditLogQuery>,
+) -> Result<Json<AuditLogResponse>, ApiError> {
+    let events = state
+        .config
+        .state_store
+        .audit_events(query.limit.unwrap_or(100))
+        .map_err(state_error)?;
+    Ok(Json(AuditLogResponse { events }))
+}
+
+async fn sync_pull(
+    State(state): State<AppState>,
+    Json(request): Json<SyncPullRequest>,
+) -> Result<Json<SyncPullResponse>, ApiError> {
+    let peer_node_id = validate_node_id(request.peer_node_id)?;
+    let peer_api_token = validate_peer_api_token(request.peer_api_token)?;
+    let tag = validate_sync_tag(request.tag)?;
+    let peer = state
+        .config
+        .state_store
+        .trusted_peer_by_node_id(&peer_node_id)
+        .map_err(state_error)?
+        .ok_or(ApiError::PeerNotTrusted)?;
+
+    let client = reqwest::Client::new();
+    let remote_tag = get_remote_json::<TagLookupResponse>(
+        &client,
+        &peer.node_url,
+        &format!("/v1/tags/{}", percent_encode_path_segment(&tag)),
+        &peer_api_token,
+    )
+    .await?;
+
+    let mut imported_objects = 0_u32;
+    let mut skipped_objects = 0_u32;
+    let mut imported_chunks = 0_u32;
+
+    for object in &remote_tag.objects {
+        let object_id = object
+            .object_id
+            .parse::<ObjectId>()
+            .map_err(|_| ApiError::Sync("peer returned invalid object id".to_owned()))?;
+        if state
+            .content_store
+            .has_object(object_id)
+            .await
+            .map_err(|err| ApiError::App(err.to_string()))?
+        {
+            skipped_objects += 1;
+            continue;
+        }
+
+        let envelope_response = get_remote_json::<GetObjectEnvelopeResponse>(
+            &client,
+            &peer.node_url,
+            &format!("/v1/objects/{}/envelope", object.object_id),
+            &peer_api_token,
+        )
+        .await?;
+        let envelope = parse_verified_envelope_base64(&envelope_response.envelope_cbor_base64)?;
+        let missing_chunk_ids =
+            missing_chunk_ids_for_payload(&state.content_store, &envelope.body.payload).await?;
+
+        for chunk_id in missing_chunk_ids {
+            let chunk_response = get_remote_json::<GetChunkResponse>(
+                &client,
+                &peer.node_url,
+                &format!("/v1/chunks/{chunk_id}"),
+                &peer_api_token,
+            )
+            .await?;
+            let bytes = STANDARD
+                .decode(chunk_response.bytes_base64.as_bytes())
+                .map_err(|_| ApiError::Sync("peer returned invalid chunk base64".to_owned()))?;
+            let parsed_chunk_id = chunk_id
+                .parse::<ChunkId>()
+                .map_err(|_| ApiError::Sync("peer returned invalid chunk id".to_owned()))?;
+            state
+                .content_store
+                .put_chunk_bytes(parsed_chunk_id, &bytes)
+                .await
+                .map_err(fs_write_error)?;
+            imported_chunks += 1;
+        }
+
+        import_verified_envelope(&state, envelope).await?;
+        imported_objects += 1;
+    }
+
+    let now_ms = state.clock.now_ms().await.map_err(app_error)?;
+    record_audit_event(
+        &state,
+        now_ms,
+        "sync_pull_completed",
+        Some(&peer_node_id),
+        &format!(
+            "tag={tag} scanned={} imported_objects={imported_objects} skipped_objects={skipped_objects} imported_chunks={imported_chunks}",
+            remote_tag.objects.len()
+        ),
+    )?;
+
+    Ok(Json(SyncPullResponse {
+        peer_node_id,
+        tag,
+        scanned_objects: remote_tag.objects.len() as u32,
+        imported_objects,
+        skipped_objects,
+        imported_chunks,
+    }))
+}
+
+async fn revoke_client_token(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Result<Json<RevokeClientTokenResponse>, ApiError> {
+    let token = validate_client_token(token)?;
+    let now_ms = state.clock.now_ms().await.map_err(app_error)?;
+    let revoked = state
+        .config
+        .state_store
+        .revoke_client_token(&token, now_ms)
+        .map_err(state_error)?;
+    record_audit_event(
+        &state,
+        now_ms,
+        "client_token_revoked",
+        Some(&redacted_secret("token", &token)),
+        &format!("revoked={revoked}"),
+    )?;
+    Ok(Json(RevokeClientTokenResponse { revoked }))
+}
+
+async fn upsert_peer(
+    State(state): State<AppState>,
+    Json(request): Json<UpsertPeerRequest>,
+) -> Result<Json<UpsertPeerResponse>, ApiError> {
+    let node_url = validate_node_url(request.node_url)?;
+    let node_id = validate_node_id(request.node_id)?;
+    let peer = PeerRecord {
+        node_url: node_url.clone(),
+        node_id,
+        trusted: request.trusted,
+    };
+    state
+        .config
+        .state_store
+        .upsert_peer(&peer)
+        .map_err(state_error)?;
+    let now_ms = state.clock.now_ms().await.map_err(app_error)?;
+    record_audit_event(
+        &state,
+        now_ms,
+        "peer_upserted",
+        Some(&peer.node_id),
+        &format!("node_url={} trusted={}", peer.node_url, peer.trusted),
+    )?;
+
+    Ok(Json(UpsertPeerResponse {
+        peer: PeerSummary {
+            node_url: peer.node_url,
+            node_id: peer.node_id,
+            trusted: peer.trusted,
+        },
+    }))
+}
+
+async fn create_invite(
+    State(state): State<AppState>,
+    Json(request): Json<CreateInviteRequest>,
+) -> Result<Json<CreateInviteResponse>, ApiError> {
+    let node_url = validate_node_url(request.node_url)?;
+    let ttl_seconds = request
+        .ttl_seconds
+        .unwrap_or(24 * 60 * 60)
+        .min(7 * 24 * 60 * 60);
+    let uses_remaining = request.uses.unwrap_or(1).clamp(1, 100);
+    let now_ms = state.clock.now_ms().await.map_err(app_error)?;
+    let expires_at_ms = now_ms.saturating_add(ttl_seconds.saturating_mul(1000));
+    let invite_code = generate_invite_code()?;
+    let invite_url = format!(
+        "hive://join?node={}&invite={}",
+        percent_encode_query_value(&node_url),
+        percent_encode_query_value(&invite_code)
+    );
+
+    state
+        .config
+        .state_store
+        .insert_invite(
+            &invite_code,
+            &InviteRecord {
+                node_url: node_url.clone(),
+                expires_at_ms,
+                uses_remaining,
+            },
+        )
+        .map_err(state_error)?;
+    record_audit_event(
+        &state,
+        now_ms,
+        "invite_created",
+        Some(&redacted_secret("invite", &invite_code)),
+        &format!("node_url={node_url} expires_at_ms={expires_at_ms} uses={uses_remaining}"),
+    )?;
+
+    Ok(Json(CreateInviteResponse {
+        invite_code,
+        invite_url,
+        node_url,
+        expires_at_ms,
+        uses_remaining,
+    }))
+}
+
+async fn join_invite(
+    State(state): State<AppState>,
+    Json(request): Json<JoinInviteRequest>,
+) -> Result<Json<JoinInviteResponse>, ApiError> {
+    let invite_code = normalize_invite_code(&request.invite_code)?;
+    let now_ms = state.clock.now_ms().await.map_err(app_error)?;
+    let api_token = generate_token()?;
+    let api_token_expires_at_ms = now_ms.saturating_add(DEFAULT_CLIENT_TOKEN_TTL_MS);
+    let node_url = match state
+        .config
+        .state_store
+        .exchange_invite_for_client_token(
+            &invite_code,
+            now_ms,
+            &api_token,
+            api_token_expires_at_ms,
+            DEFAULT_CLIENT_TOKEN_SCOPES,
+        )
+        .map_err(state_error)?
+    {
+        ConsumedInvite::Active { node_url } => node_url,
+        ConsumedInvite::Expired => return Err(ApiError::InviteExpired),
+        ConsumedInvite::NotFound => return Err(ApiError::InviteNotFound),
+    };
+
+    record_audit_event(
+        &state,
+        now_ms,
+        "join_exchanged",
+        Some(&redacted_secret("invite", &invite_code)),
+        &format!(
+            "node_url={node_url} token={} token_expires_at_ms={api_token_expires_at_ms} scopes={DEFAULT_CLIENT_TOKEN_SCOPES}",
+            redacted_secret("token", &api_token)
+        ),
+    )?;
+    let peers = peer_summaries(&state, false)?;
+
+    Ok(Json(JoinInviteResponse {
+        node_url,
+        api_token,
+        api_token_expires_at_ms,
+        api_token_scope: DEFAULT_CLIENT_TOKEN_SCOPES.to_owned(),
+        peers,
+    }))
 }
 
 async fn publish_object(
@@ -397,28 +925,12 @@ async fn import_object_envelope(
     Json(request): Json<ImportObjectEnvelopeRequest>,
 ) -> Result<Json<ImportObjectEnvelopeResponse>, ApiError> {
     let envelope = parse_verified_envelope_base64(&request.envelope_cbor_base64)?;
-    ensure_chunks_available(&state.content_store, &envelope.body.payload).await?;
-
-    state
-        .content_store
-        .put_object_envelope(&envelope)
-        .await
-        .map_err(fs_write_error)?;
-    let chunks = stored_chunks_from_payload(&state.content_store, &envelope.body.payload);
-    let received_at_ms = state.clock.now_ms().await.map_err(app_error)?;
-    state
-        .metadata_store
-        .record_object(
-            &envelope,
-            state.content_store.object_path(envelope.object_id),
-            &chunks,
-            received_at_ms,
-        )
-        .map_err(|err| ApiError::Metadata(err.to_string()))?;
+    let object_id = envelope.object_id.to_string();
+    let chunk_ids = import_verified_envelope(&state, envelope).await?;
 
     Ok(Json(ImportObjectEnvelopeResponse {
-        object_id: envelope.object_id.to_string(),
-        chunk_ids: chunk_ids_from_payload(&envelope.body.payload),
+        object_id,
+        chunk_ids,
     }))
 }
 
@@ -840,8 +1352,191 @@ fn parse_object_kind(value: &str) -> Result<ObjectKind, ApiError> {
     }
 }
 
+fn validate_node_url(node_url: String) -> Result<String, ApiError> {
+    let node_url = node_url.trim().trim_end_matches('/').to_owned();
+    let uri = node_url
+        .parse::<axum::http::Uri>()
+        .map_err(|_| ApiError::InvalidInvite)?;
+    let valid_scheme = matches!(uri.scheme_str(), Some("http" | "https"));
+    if node_url.is_empty()
+        || node_url.chars().any(char::is_whitespace)
+        || !valid_scheme
+        || uri.authority().is_none()
+    {
+        return Err(ApiError::InvalidInvite);
+    }
+    Ok(node_url)
+}
+
+fn validate_node_id(node_id: String) -> Result<String, ApiError> {
+    let node_id = node_id.trim().to_owned();
+    if node_id.len() != 64 || !node_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::InvalidInvite);
+    }
+    Ok(node_id)
+}
+
+fn validate_client_token(token: String) -> Result<String, ApiError> {
+    let token = token.trim().to_owned();
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::InvalidClientToken);
+    }
+    Ok(token)
+}
+
+fn validate_peer_api_token(token: String) -> Result<String, ApiError> {
+    let token = token.trim().to_owned();
+    if token.is_empty() || token.chars().any(char::is_whitespace) {
+        return Err(ApiError::InvalidClientToken);
+    }
+    Ok(token)
+}
+
+fn validate_sync_tag(tag: String) -> Result<String, ApiError> {
+    let tag = tag.trim().to_owned();
+    if tag.is_empty() || tag.len() > 128 || tag.chars().any(char::is_control) {
+        return Err(ApiError::InvalidInvite);
+    }
+    Ok(tag)
+}
+
+fn peer_summaries(state: &AppState, include_trust: bool) -> Result<Vec<PeerSummary>, ApiError> {
+    state
+        .config
+        .state_store
+        .peer_summaries(include_trust)
+        .map_err(state_error)
+}
+
+fn normalize_invite_code(invite_code: &str) -> Result<String, ApiError> {
+    let invite_code = invite_code.trim().to_ascii_uppercase();
+    if invite_code.is_empty()
+        || invite_code.len() > 64
+        || !invite_code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(ApiError::InvalidInvite);
+    }
+    Ok(invite_code)
+}
+
+fn generate_invite_code() -> Result<String, ApiError> {
+    let mut bytes = [0_u8; 12];
+    getrandom::getrandom(&mut bytes).map_err(|err| ApiError::App(err.to_string()))?;
+    let encoded = hex::encode_upper(bytes);
+    Ok(format!(
+        "{}-{}-{}",
+        &encoded[0..8],
+        &encoded[8..16],
+        &encoded[16..24]
+    ))
+}
+
+fn generate_token() -> Result<String, ApiError> {
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|err| ApiError::App(err.to_string()))?;
+    Ok(hex::encode(bytes))
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    percent_encode_query_value(value)
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut output = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                output.push(byte as char);
+            }
+            _ => output.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    output
+}
+
+async fn import_verified_envelope(
+    state: &AppState,
+    envelope: ObjectEnvelope,
+) -> Result<Vec<String>, ApiError> {
+    ensure_chunks_available(&state.content_store, &envelope.body.payload).await?;
+
+    state
+        .content_store
+        .put_object_envelope(&envelope)
+        .await
+        .map_err(fs_write_error)?;
+    let chunks = stored_chunks_from_payload(&state.content_store, &envelope.body.payload);
+    let chunk_ids = chunk_ids_from_payload(&envelope.body.payload);
+    let received_at_ms = state.clock.now_ms().await.map_err(app_error)?;
+    state
+        .metadata_store
+        .record_object(
+            &envelope,
+            state.content_store.object_path(envelope.object_id),
+            &chunks,
+            received_at_ms,
+        )
+        .map_err(|err| ApiError::Metadata(err.to_string()))?;
+
+    Ok(chunk_ids)
+}
+
+async fn get_remote_json<T: for<'de> Deserialize<'de>>(
+    client: &reqwest::Client,
+    base_url: &str,
+    path: &str,
+    token: &str,
+) -> Result<T, ApiError> {
+    let url = format!("{}{path}", base_url.trim_end_matches('/'));
+    let response = client
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|err| ApiError::Sync(err.to_string()))?;
+    let response = response
+        .error_for_status()
+        .map_err(|err| ApiError::Sync(err.to_string()))?;
+    response
+        .json::<T>()
+        .await
+        .map_err(|err| ApiError::Sync(err.to_string()))
+}
+
 fn app_error(err: hivemind_app::AppError) -> ApiError {
     ApiError::App(err.to_string())
+}
+
+fn state_error(err: NodeStateStoreError) -> ApiError {
+    ApiError::App(err.to_string())
+}
+
+fn record_audit_event(
+    state: &AppState,
+    created_at_ms: u64,
+    event_type: &str,
+    subject: Option<&str>,
+    detail: &str,
+) -> Result<(), ApiError> {
+    state
+        .config
+        .state_store
+        .record_audit_event(created_at_ms, event_type, subject, detail)
+        .map_err(state_error)
+}
+
+fn redacted_secret(prefix: &str, secret: &str) -> String {
+    let suffix = secret
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{prefix}:...{suffix}")
 }
 
 #[derive(Clone)]
@@ -865,6 +1560,7 @@ mod tests {
         body::to_bytes,
         http::{Method, Request},
     };
+    use tokio::net::TcpListener;
     use tower::ServiceExt;
 
     #[derive(Clone)]
@@ -884,6 +1580,16 @@ mod tests {
     }
 
     fn test_app(tempdir: &tempfile::TempDir) -> TestApp {
+        test_app_with_state_store(
+            tempdir,
+            Arc::new(SqliteNodeStateStore::in_memory().unwrap()),
+        )
+    }
+
+    fn test_app_with_state_store(
+        tempdir: &tempfile::TempDir,
+        state_store: Arc<SqliteNodeStateStore>,
+    ) -> TestApp {
         let content_store = Arc::new(FsContentStore::new(tempdir.path()));
         let metadata_store = Arc::new(SqliteMetadataStore::in_memory().unwrap());
         let state = AppState {
@@ -892,7 +1598,8 @@ mod tests {
             content_store: Arc::clone(&content_store),
             metadata_store: Arc::clone(&metadata_store),
             config: ApiConfig {
-                bearer_token: "secret".to_owned(),
+                admin_token: "secret".to_owned(),
+                state_store,
             },
         };
         TestApp {
@@ -903,10 +1610,14 @@ mod tests {
     }
 
     fn authorized_get_request(path: &str) -> Request<Body> {
+        authorized_get_request_with_token(path, "secret")
+    }
+
+    fn authorized_get_request_with_token(path: &str, token: &str) -> Request<Body> {
         Request::builder()
             .method(Method::GET)
             .uri(path)
-            .header(header::AUTHORIZATION, "Bearer secret")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .body(Body::empty())
             .unwrap()
     }
@@ -916,6 +1627,15 @@ mod tests {
             .method(Method::POST)
             .uri(path)
             .header(header::AUTHORIZATION, "Bearer secret")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn public_json_request(path: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri(path)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
@@ -962,6 +1682,706 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn create_invite_requires_auth() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(public_json_request(
+                "/v1/invites",
+                serde_json::json!({"node_url": "https://hive.example.internal"}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn peers_require_auth_and_can_be_listed() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let router = test_app(&tempdir).router;
+
+        let response = router
+            .clone()
+            .oneshot(public_json_request(
+                "/v1/peers",
+                serde_json::json!({"node_url": "https://node-b.internal", "node_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/peers",
+                serde_json::json!({"node_url": "https://node-b.internal", "node_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "trusted": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(authorized_get_request("/v1/peers"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: PeerListResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body.peers,
+            vec![PeerSummary {
+                node_url: "https://node-b.internal".to_owned(),
+                node_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                trusted: true,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_pull_rejects_untrusted_peer() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_store = Arc::new(SqliteNodeStateStore::in_memory().unwrap());
+        state_store
+            .upsert_peer(&PeerRecord {
+                node_url: "http://127.0.0.1:9".to_owned(),
+                node_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                trusted: false,
+            })
+            .unwrap();
+        let router = test_app_with_state_store(&tempdir, state_store).router;
+
+        let response = router
+            .oneshot(authorized_json_request(
+                "/v1/sync/pull",
+                serde_json::json!({
+                    "peer_node_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "peer_api_token": "secret",
+                    "tag": "sync"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn sync_pull_imports_tagged_object_from_trusted_peer() {
+        let source_tempdir = tempfile::tempdir().unwrap();
+        let source_router = test_app(&source_tempdir).router;
+        let response = source_router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "text/plain",
+                    "payload_base64": STANDARD.encode(b"synced memory"),
+                    "tags": ["sync"]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_addr = listener.local_addr().unwrap();
+        let source_server = tokio::spawn(async move {
+            axum::serve(listener, source_router).await.unwrap();
+        });
+
+        let target_tempdir = tempfile::tempdir().unwrap();
+        let target_state = Arc::new(SqliteNodeStateStore::in_memory().unwrap());
+        target_state
+            .upsert_peer(&PeerRecord {
+                node_url: format!("http://{source_addr}"),
+                node_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                trusted: true,
+            })
+            .unwrap();
+        let target_router = test_app_with_state_store(&target_tempdir, target_state).router;
+
+        let response = target_router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/sync/pull",
+                serde_json::json!({
+                    "peer_node_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "peer_api_token": "secret",
+                    "tag": "sync"
+                }),
+            ))
+            .await
+            .unwrap();
+        source_server.abort();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: SyncPullResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.scanned_objects, 1);
+        assert_eq!(body.imported_objects, 1);
+
+        let response = target_router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{}",
+                published.object_id
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn create_invite_and_join_exchanges_for_token_once() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let router = test_app(&tempdir).router;
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/peers",
+                serde_json::json!({"node_url": "https://node-b.internal", "node_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "trusted": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/invites",
+                serde_json::json!({
+                    "node_url": "https://hive.example.internal/",
+                    "ttl_seconds": 3600,
+                    "uses": 1
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let invite: CreateInviteResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(invite.node_url, "https://hive.example.internal");
+        assert_eq!(invite.uses_remaining, 1);
+        assert!(invite.invite_url.starts_with("hive://join?node="));
+
+        let response = router
+            .clone()
+            .oneshot(public_json_request(
+                "/v1/join",
+                serde_json::json!({"invite_code": invite.invite_code.clone()}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let joined: JoinInviteResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(joined.node_url, "https://hive.example.internal");
+        assert_ne!(joined.api_token, "secret");
+        assert_eq!(joined.api_token_scope, DEFAULT_CLIENT_TOKEN_SCOPES);
+        assert_eq!(
+            joined.api_token_expires_at_ms,
+            1_700_000_000_000 + DEFAULT_CLIENT_TOKEN_TTL_MS
+        );
+        assert_eq!(
+            joined.peers,
+            vec![PeerSummary {
+                node_url: "https://node-b.internal".to_owned(),
+                node_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                trusted: false,
+            }]
+        );
+
+        let response = router
+            .clone()
+            .oneshot(authorized_get_request_with_token(
+                "/v1/tags/unknown",
+                &joined.api_token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/invites")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", joined.api_token),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"node_url": "https://other.internal"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = router
+            .oneshot(public_json_request(
+                "/v1/join",
+                serde_json::json!({"invite_code": invite.invite_code}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn audit_log_records_admin_security_actions() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let router = test_app(&tempdir).router;
+
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/peers",
+                serde_json::json!({"node_url": "https://node-b.internal", "node_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "trusted": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/invites",
+                serde_json::json!({"node_url": "https://hive.example.internal"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let invite: CreateInviteResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(public_json_request(
+                "/v1/join",
+                serde_json::json!({"invite_code": invite.invite_code}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let joined: JoinInviteResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                &format!("/v1/client-tokens/{}/revoke", joined.api_token),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(authorized_get_request("/v1/audit?limit=10"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: AuditLogResponse = serde_json::from_slice(&bytes).unwrap();
+        let event_types = body
+            .events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            event_types,
+            vec![
+                "client_token_revoked",
+                "join_exchanged",
+                "invite_created",
+                "peer_upserted",
+            ]
+        );
+        assert!(body.events.iter().any(|event| event
+            .subject
+            .as_deref()
+            .is_some_and(|subject| subject.starts_with("token:..."))));
+        assert!(body.events.iter().any(|event| event
+            .subject
+            .as_deref()
+            .is_some_and(|subject| subject.starts_with("invite:..."))));
+    }
+
+    #[tokio::test]
+    async fn joined_client_token_persists_after_state_reload() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_path = tempdir.path().join("state.sqlite3");
+        let router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/invites",
+                serde_json::json!({"node_url": "https://hive.example.internal"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let invite: CreateInviteResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = router
+            .oneshot(public_json_request(
+                "/v1/join",
+                serde_json::json!({"invite_code": invite.invite_code}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let joined: JoinInviteResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let reloaded_router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+        let response = reloaded_router
+            .oneshot(authorized_get_request_with_token(
+                "/v1/tags/unknown",
+                &joined.api_token,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_can_revoke_joined_client_token() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let router = test_app(&tempdir).router;
+
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/invites",
+                serde_json::json!({"node_url": "https://hive.example.internal"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let invite: CreateInviteResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(public_json_request(
+                "/v1/join",
+                serde_json::json!({"invite_code": invite.invite_code}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let joined: JoinInviteResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(authorized_get_request_with_token(
+                "/v1/tags/unknown",
+                &joined.api_token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                &format!("/v1/client-tokens/{}/revoke", joined.api_token),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let revoked: RevokeClientTokenResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(revoked.revoked);
+
+        let response = router
+            .oneshot(authorized_get_request_with_token(
+                "/v1/tags/unknown",
+                &joined.api_token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn read_only_client_token_can_read_but_not_write_or_import() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_store = Arc::new(SqliteNodeStateStore::in_memory().unwrap());
+        let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        state_store
+            .insert_client_token(token, 1, 2_000_000_000_000, CLIENT_TOKEN_SCOPE_MEMORY_READ)
+            .unwrap();
+        let router = test_app_with_state_store(&tempdir, state_store).router;
+
+        let response = router
+            .clone()
+            .oneshot(authorized_get_request_with_token("/v1/tags/unknown", token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/objects")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "object_type": "fact",
+                            "mime_type": "text/plain",
+                            "payload_base64": STANDARD.encode(b"hello"),
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/objects/envelope/plan")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"envelope_cbor_base64": "invalid"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn legacy_memory_scope_can_read_write_and_import() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_store = Arc::new(SqliteNodeStateStore::in_memory().unwrap());
+        let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        state_store
+            .insert_client_token(token, 1, 2_000_000_000_000, "memory")
+            .unwrap();
+        let router = test_app_with_state_store(&tempdir, state_store).router;
+
+        let response = router
+            .clone()
+            .oneshot(authorized_get_request_with_token("/v1/tags/unknown", token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/objects")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "object_type": "fact",
+                            "mime_type": "text/plain",
+                            "payload_base64": STANDARD.encode(b"hello"),
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/objects/envelope/plan")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"envelope_cbor_base64": "invalid"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn expired_client_token_is_unauthorized() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_store = Arc::new(SqliteNodeStateStore::in_memory().unwrap());
+        state_store
+            .insert_client_token(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                1,
+                2,
+                CLIENT_TOKEN_SCOPE_MEMORY_READ,
+            )
+            .unwrap();
+        let router = test_app_with_state_store(&tempdir, state_store).router;
+
+        let response = router
+            .oneshot(authorized_get_request_with_token(
+                "/v1/tags/unknown",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn invite_use_persists_after_state_reload() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_path = tempdir.path().join("state.sqlite3");
+        let router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+
+        let response = router
+            .oneshot(authorized_json_request(
+                "/v1/invites",
+                serde_json::json!({"node_url": "https://hive.example.internal", "uses": 1}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let invite: CreateInviteResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let reloaded_router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+        let response = reloaded_router
+            .clone()
+            .oneshot(public_json_request(
+                "/v1/join",
+                serde_json::json!({"invite_code": invite.invite_code.clone()}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let reloaded_router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+        let response = reloaded_router
+            .oneshot(public_json_request(
+                "/v1/join",
+                serde_json::json!({"invite_code": invite.invite_code}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn peers_persist_after_state_reload() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_path = tempdir.path().join("state.sqlite3");
+        let router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+
+        let response = router
+            .oneshot(authorized_json_request(
+                "/v1/peers",
+                serde_json::json!({"node_url": "https://node-b.internal", "node_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "trusted": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let reloaded_router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+        let response = reloaded_router
+            .oneshot(authorized_get_request("/v1/peers"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: PeerListResponse = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            body.peers,
+            vec![PeerSummary {
+                node_url: "https://node-b.internal".to_owned(),
+                node_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                trusted: true,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_invite_rejects_invalid_node_url() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let response = test_app(&tempdir)
+            .router
+            .oneshot(authorized_json_request(
+                "/v1/invites",
+                serde_json::json!({"node_url": "javascript:alert(1)"}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = error_response(response).await;
+        assert_eq!(body.error.code, "invalid_invite");
     }
 
     #[tokio::test]

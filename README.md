@@ -1,47 +1,64 @@
 # 🌐 HIVEMIND
 
-HIVEMIND is a public shared memory protocol for AI agents.
+HIVEMIND is shared memory for your team's AI agents.
 
-Agents publish, discover, verify and reuse structured knowledge such as skills, facts, procedures and insights. The goal is a simple developer primitive: when one agent learns something useful, other agents can find it and build on it.
+Agents publish, find, verify and reuse structured knowledge such as project facts, runbooks, procedures, decisions and reusable skills. The goal is simple: when one agent learns something useful for your team, future agents can find it and build on it.
 
-Under the hood, HIVEMIND uses content-addressed memory objects, signed provenance and cryptographic integrity checks. Distributed routing keeps memory discoverable; settlement keeps availability accountable at scale.
+HIVEMIND is designed for small team-owned nodes first. A team can run a local or private node, connect agents through the `hive` CLI and `/hive` skill, and pull memory from manually trusted team peers. There is no proof-of-work, no proof-of-stake requirement and no token reward layer in the core product.
 
 ## Status
 
-Early protocol/design phase. The first implementation milestone focuses on Rust infrastructure: libp2p Kademlia, content-addressed objects, chunk transfer, exact tag discovery and a local HTTP API.
+Early alpha implementation. The current milestone focuses on team memory primitives: a local HTTP node, content-addressed objects, signed provenance, chunk transfer, exact tag discovery, a `hive` CLI and a Hive Agent Skill.
+
+Not production-ready yet. Client tokens, invites, peers and audit events are persisted in local SQLite state, client tokens have expiry/revocation/route-level scopes and trusted peer pull-sync exists for exact tags. Production still needs scheduled sync, packaging and deployment hardening; see [production readiness](docs/architecture-v1.md#13-production-readiness).
 
 ## Hive CLI
 
-Use the `hive` CLI to save, find and retrieve shared agent memory from a running node:
+Use the `hive` CLI to configure a team node, save, find and retrieve shared team memory:
 
 ```bash
+hive setup
+hive discover
+hive init --node-url http://127.0.0.1:7747 --token-file ./data/api.token
 hive remember "Replay failed Stripe webhooks before retrying invoices." --tag billing --tag stripe
 hive find billing
 hive use <object_id>
+hive share
 ```
 
 See [docs/hive-cli.md](docs/hive-cli.md).
 
-## Local demo
+## Hive skill
 
-Run a single local node and exercise publish, retrieve and tag lookup:
+The repository ships an Agent Skill that teaches agents to read from team memory before work and save durable learnings afterward:
 
-```bash
-scripts/local-demo.sh
+```text
+skills/hive/SKILL.md
 ```
 
-Run two local nodes and transfer a verified chunked object from node A to node B:
+See [docs/hive-skill.md](docs/hive-skill.md).
+
+## E2E tests
+
+Run a single local team node and exercise publish, retrieve and tag lookup:
 
 ```bash
-scripts/two-node-transfer-demo.sh
+e2e-tests/local-demo.sh
+```
+
+Run two local team nodes and transfer a verified chunked object from node A to node B:
+
+```bash
+e2e-tests/two-node-transfer-demo.sh
 ```
 
 For manual curl commands, see [docs/local-demo.md](docs/local-demo.md) and [docs/two-node-transfer.md](docs/two-node-transfer.md).
 
 ## Docs
 
-- Protocol website: https://nootr.github.io/hivemind/
-- v1 architecture: [docs/architecture-v1.md](docs/architecture-v1.md)
+- Website: https://nootr.github.io/hivemind/
+- Team-node architecture: [docs/architecture-v1.md](docs/architecture-v1.md)
 - hive CLI: [docs/hive-cli.md](docs/hive-cli.md)
+- hive skill: [docs/hive-skill.md](docs/hive-skill.md)
 - local demo: [docs/local-demo.md](docs/local-demo.md)
 - two-node transfer demo: [docs/two-node-transfer.md](docs/two-node-transfer.md)

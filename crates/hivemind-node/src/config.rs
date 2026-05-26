@@ -17,6 +17,8 @@ pub struct DataConfig {
 pub struct ApiFileConfig {
     pub bind_addr: SocketAddr,
     pub auth_token_file: PathBuf,
+    #[serde(default)]
+    pub public_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -67,6 +69,7 @@ agent_key_path = "./data/agent.ed25519"
 
         assert_eq!(config.data.dir, PathBuf::from("./data"));
         assert_eq!(config.api.bind_addr, "127.0.0.1:7747".parse().unwrap());
+        assert_eq!(config.api.public_url, None);
         assert_eq!(
             config.identity.agent_key_path,
             PathBuf::from("./data/agent.ed25519")
