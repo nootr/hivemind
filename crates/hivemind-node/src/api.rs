@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::state::{
-    ConsumedInvite, NodeStateStoreError, SqliteNodeStateStore, CLIENT_TOKEN_SCOPE_MEMORY,
-    DEFAULT_CLIENT_TOKEN_TTL_MS,
+    AuditEvent, ConsumedInvite, NodeStateStoreError, SqliteNodeStateStore,
+    CLIENT_TOKEN_SCOPE_MEMORY, DEFAULT_CLIENT_TOKEN_TTL_MS,
 };
 
 #[derive(Clone, Debug)]
@@ -168,6 +168,17 @@ pub struct PeerListResponse {
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct RevokeClientTokenResponse {
     pub revoked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuditLogQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct AuditLogResponse {
+    pub events: Vec<AuditEvent>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
@@ -413,6 +424,7 @@ pub fn app(state: AppState) -> Router {
         ));
 
     let admin_routes = Router::new()
+        .route("/v1/audit", get(get_audit_log))
         .route("/v1/invites", post(create_invite))
         .route("/v1/peers", get(get_peers).post(upsert_peer))
         .route(
@@ -491,6 +503,18 @@ async fn get_peers(State(state): State<AppState>) -> Result<Json<PeerListRespons
     }))
 }
 
+async fn get_audit_log(
+    State(state): State<AppState>,
+    Query(query): Query<AuditLogQuery>,
+) -> Result<Json<AuditLogResponse>, ApiError> {
+    let events = state
+        .config
+        .state_store
+        .audit_events(query.limit.unwrap_or(100))
+        .map_err(state_error)?;
+    Ok(Json(AuditLogResponse { events }))
+}
+
 async fn revoke_client_token(
     State(state): State<AppState>,
     Path(token): Path<String>,
@@ -502,6 +526,13 @@ async fn revoke_client_token(
         .state_store
         .revoke_client_token(&token, now_ms)
         .map_err(state_error)?;
+    record_audit_event(
+        &state,
+        now_ms,
+        "client_token_revoked",
+        Some(&redacted_secret("token", &token)),
+        &format!("revoked={revoked}"),
+    )?;
     Ok(Json(RevokeClientTokenResponse { revoked }))
 }
 
@@ -521,6 +552,14 @@ async fn upsert_peer(
         .state_store
         .upsert_peer(&peer)
         .map_err(state_error)?;
+    let now_ms = state.clock.now_ms().await.map_err(app_error)?;
+    record_audit_event(
+        &state,
+        now_ms,
+        "peer_upserted",
+        Some(&peer.node_id),
+        &format!("node_url={} trusted={}", peer.node_url, peer.trusted),
+    )?;
 
     Ok(Json(UpsertPeerResponse {
         peer: PeerSummary {
@@ -562,6 +601,13 @@ async fn create_invite(
             },
         )
         .map_err(state_error)?;
+    record_audit_event(
+        &state,
+        now_ms,
+        "invite_created",
+        Some(&redacted_secret("invite", &invite_code)),
+        &format!("node_url={node_url} expires_at_ms={expires_at_ms} uses={uses_remaining}"),
+    )?;
 
     Ok(Json(CreateInviteResponse {
         invite_code,
@@ -597,6 +643,16 @@ async fn join_invite(
         ConsumedInvite::NotFound => return Err(ApiError::InviteNotFound),
     };
 
+    record_audit_event(
+        &state,
+        now_ms,
+        "join_exchanged",
+        Some(&redacted_secret("invite", &invite_code)),
+        &format!(
+            "node_url={node_url} token={} token_expires_at_ms={api_token_expires_at_ms} scope={CLIENT_TOKEN_SCOPE_MEMORY}",
+            redacted_secret("token", &api_token)
+        ),
+    )?;
     let peers = peer_summaries(&state, false)?;
 
     Ok(Json(JoinInviteResponse {
@@ -1202,6 +1258,32 @@ fn state_error(err: NodeStateStoreError) -> ApiError {
     ApiError::App(err.to_string())
 }
 
+fn record_audit_event(
+    state: &AppState,
+    created_at_ms: u64,
+    event_type: &str,
+    subject: Option<&str>,
+    detail: &str,
+) -> Result<(), ApiError> {
+    state
+        .config
+        .state_store
+        .record_audit_event(created_at_ms, event_type, subject, detail)
+        .map_err(state_error)
+}
+
+fn redacted_secret(prefix: &str, secret: &str) -> String {
+    let suffix = secret
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{prefix}:...{suffix}")
+}
+
 #[derive(Clone)]
 pub struct SystemClock;
 
@@ -1506,6 +1588,87 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn audit_log_records_admin_security_actions() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let router = test_app(&tempdir).router;
+
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/peers",
+                serde_json::json!({"node_url": "https://node-b.internal", "node_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "trusted": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/invites",
+                serde_json::json!({"node_url": "https://hive.example.internal"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let invite: CreateInviteResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(public_json_request(
+                "/v1/join",
+                serde_json::json!({"invite_code": invite.invite_code}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let joined: JoinInviteResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                &format!("/v1/client-tokens/{}/revoke", joined.api_token),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(authorized_get_request("/v1/audit?limit=10"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: AuditLogResponse = serde_json::from_slice(&bytes).unwrap();
+        let event_types = body
+            .events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            event_types,
+            vec![
+                "client_token_revoked",
+                "join_exchanged",
+                "invite_created",
+                "peer_upserted",
+            ]
+        );
+        assert!(body.events.iter().any(|event| event
+            .subject
+            .as_deref()
+            .is_some_and(|subject| subject.starts_with("token:..."))));
+        assert!(body.events.iter().any(|event| event
+            .subject
+            .as_deref()
+            .is_some_and(|subject| subject.starts_with("invite:..."))));
     }
 
     #[tokio::test]

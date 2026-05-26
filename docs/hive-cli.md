@@ -4,7 +4,7 @@
 
 The CLI talks to a team-owned `hivemind-node` HTTP API. The node may run on your machine, on a private team server, or behind an internal gateway. The CLI does not start or manage the node yet.
 
-Status: alpha/local team prototype. Client tokens, invites and peers are persisted in node SQLite state. Client tokens have expiry, revocation and a memory scope, but production access control still needs audit logs, narrower scope policy and deployment hardening.
+Status: alpha/local team prototype. Client tokens, invites, peers and audit events are persisted in node SQLite state. Client tokens have expiry, revocation and a memory scope, but production access control still needs narrower scope policy and deployment hardening.
 
 ## Configuration
 
@@ -91,7 +91,7 @@ hive join 'hive://join?node=https%3A%2F%2Fhive.your-team.internal&invite=ABCD-EF
 hive join ABCD-EFGH-IJKL
 ```
 
-Security rule: shared URLs must not contain the admin API token. Invite links contain a short-lived, limited-use invite code that `hive join` exchanges for a generated client token in local config. Generated client tokens expire and can be revoked by an admin through the node API.
+Security rule: shared URLs must not contain the admin API token. Invite links contain a short-lived, limited-use invite code that `hive join` exchanges for a generated client token in local config. Generated client tokens expire and can be revoked by an admin through the node API. Admin security events are available from `GET /v1/audit`.
 
 ## Peer candidates and trust
 

@@ -30,7 +30,7 @@ On first start, the node creates:
 - `./data/api.token` — bearer token for `/v1/*`
 - `./data/agent.ed25519` — local agent signing seed
 - `./data/metadata.sqlite3` — local memory metadata index
-- `./data/state.sqlite3` — client token, invite and peer/trust state
+- `./data/state.sqlite3` — client token, invite, peer/trust and audit state
 - content-addressed object/chunk files under `./data`
 
 `/health` is unauthenticated. `/v1/*` requires bearer auth.
@@ -218,7 +218,7 @@ curl -sS \
   http://127.0.0.1:7747/v1/join
 ```
 
-Invite links contain short-lived codes, not admin API tokens. Join returns a generated client token with expiry and the `memory` scope. Admins can revoke generated client tokens through `POST /v1/client-tokens/{token}/revoke`. Join responses may include peer candidates; clients must keep them untrusted until a user explicitly trusts them.
+Invite links contain short-lived codes, not admin API tokens. Join returns a generated client token with expiry and the `memory` scope. Admins can revoke generated client tokens through `POST /v1/client-tokens/{token}/revoke` and inspect security events through `GET /v1/audit`. Join responses may include peer candidates; clients must keep them untrusted until a user explicitly trusts them.
 
 A node admin can register a peer candidate on a running node:
 

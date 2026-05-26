@@ -175,6 +175,7 @@ Node control-plane state is stored separately in `state.sqlite3`:
 - generated client tokens, expiry, revocation timestamp and scope
 - invite codes, expiry and remaining uses
 - peer node URLs, node IDs/public-key fingerprints and trust flags
+- audit events for invite creation, join exchanges, token revocation and peer upserts/trust changes
 
 `state.sqlite3` is security-relevant operational state and must be backed up, protected and migrated carefully.
 
@@ -191,6 +192,7 @@ POST /v1/objects/envelope
 POST /v1/objects/envelope/plan
 GET  /v1/chunks/{chunk_id}
 PUT  /v1/chunks/{chunk_id}
+GET  /v1/audit
 POST /v1/invites
 GET  /v1/peers
 POST /v1/peers
@@ -316,7 +318,6 @@ This implementation is an alpha/local team prototype, not production-ready.
 
 Production blockers:
 
-- Add audit logs for invite creation, join exchanges, token revocation and trust changes.
 - Add narrower per-route client-token scope policy beyond the current memory scope.
 - Add a clear node public-key/fingerprint confirmation UX before trust.
 - Harden UDP discovery with rate limits, validation and deployment guidance for VPNs/subnets.
@@ -327,11 +328,10 @@ Production blockers:
 
 ## 14. Near-term production path
 
-1. Add audit logs for invite creation, join exchanges, token revocation and trust changes.
-2. Add narrower per-route client-token scope policy beyond the current memory scope.
-3. Add trusted team peer sync.
-4. Package the node and CLI for local/team installation.
-5. Add better search beyond exact tags.
-6. Add update/supersede/tombstone UX for memory hygiene.
-7. Add team/workspace configuration.
-8. Add admin docs for private deployment, backups and migrations.
+1. Add narrower per-route client-token scope policy beyond the current memory scope.
+2. Add trusted team peer sync.
+3. Package the node and CLI for local/team installation.
+4. Add better search beyond exact tags.
+5. Add update/supersede/tombstone UX for memory hygiene.
+6. Add team/workspace configuration.
+7. Add admin docs for private deployment, backups and migrations.

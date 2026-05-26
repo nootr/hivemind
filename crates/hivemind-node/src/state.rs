@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::{fs::OpenOptions, path::Path, sync::Mutex};
 
 use crate::api::{InviteRecord, PeerRecord, PeerSummary};
@@ -42,6 +43,15 @@ pub enum ConsumedInvite {
     Active { node_url: String },
     Expired,
     NotFound,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct AuditEvent {
+    pub id: i64,
+    pub created_at_ms: u64,
+    pub event_type: String,
+    pub subject: Option<String>,
+    pub detail: String,
 }
 
 impl SqliteNodeStateStore {
@@ -258,6 +268,50 @@ impl SqliteNodeStateStore {
         Ok(())
     }
 
+    pub fn record_audit_event(
+        &self,
+        created_at_ms: u64,
+        event_type: &str,
+        subject: Option<&str>,
+        detail: &str,
+    ) -> NodeStateStoreResult<()> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| NodeStateStoreError::LockPoisoned)?;
+        connection.execute(
+            "INSERT INTO audit_events (created_at_ms, event_type, subject, detail)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![created_at_ms as i64, event_type, subject, detail],
+        )?;
+        Ok(())
+    }
+
+    pub fn audit_events(&self, limit: u32) -> NodeStateStoreResult<Vec<AuditEvent>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| NodeStateStoreError::LockPoisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT id, created_at_ms, event_type, subject, detail
+             FROM audit_events
+             ORDER BY id DESC
+             LIMIT ?1",
+        )?;
+        let events = statement
+            .query_map(params![limit.clamp(1, 500) as i64], |row| {
+                Ok(AuditEvent {
+                    id: row.get(0)?,
+                    created_at_ms: row.get::<_, i64>(1)? as u64,
+                    event_type: row.get(2)?,
+                    subject: row.get(3)?,
+                    detail: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(events)
+    }
+
     pub fn peer_summaries(&self, include_trust: bool) -> NodeStateStoreResult<Vec<PeerSummary>> {
         let connection = self
             .connection
@@ -400,6 +454,14 @@ CREATE TABLE IF NOT EXISTS peers (
     node_url TEXT NOT NULL,
     trusted INTEGER NOT NULL CHECK (trusted IN (0, 1))
 );
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at_ms INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    subject TEXT,
+    detail TEXT NOT NULL
+);
 "#;
 
 #[cfg(test)]
@@ -534,6 +596,28 @@ mod tests {
             store.consume_invite("INVITE", 1000).unwrap(),
             ConsumedInvite::NotFound
         );
+    }
+
+    #[test]
+    fn audit_events_persist_newest_first() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("state.sqlite3");
+        let store = SqliteNodeStateStore::open(&path).unwrap();
+        store
+            .record_audit_event(1000, "invite_created", Some("invite:abcd"), "node_url=x")
+            .unwrap();
+        store
+            .record_audit_event(2000, "join_exchanged", Some("invite:abcd"), "scope=memory")
+            .unwrap();
+
+        let store = SqliteNodeStateStore::open(&path).unwrap();
+        let events = store.audit_events(10).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "join_exchanged");
+        assert_eq!(events[0].created_at_ms, 2000);
+        assert_eq!(events[0].subject, Some("invite:abcd".to_owned()));
+        assert_eq!(events[1].event_type, "invite_created");
     }
 
     #[test]
