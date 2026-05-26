@@ -346,9 +346,9 @@ pub async fn execute_from_env(cli: Cli, client: &reqwest::Client) -> Result<Stri
         } => init(node_url, token_file, token, config_path),
         Command::Join { invite } => join(client, invite).await,
         Command::Discover { timeout_ms } => discover(timeout_ms),
-        Command::Setup { timeout_ms } => setup(timeout_ms),
+        Command::Setup { timeout_ms } => setup(client, timeout_ms).await,
         Command::Share { node_url } => share(client, node_url).await,
-        Command::Peers => list_peers(),
+        Command::Peers => list_peers(client).await,
         Command::Peer { command } => update_peer_trust(command),
         Command::Remember { text, tags } => {
             let config = Config::from_env_or_file()?;
@@ -379,7 +379,7 @@ pub async fn execute(
             share_with_config(client, config, advertised_node_url).await
         }
         Command::Discover { timeout_ms } => discover(timeout_ms),
-        Command::Setup { timeout_ms } => setup(timeout_ms),
+        Command::Setup { timeout_ms } => setup(client, timeout_ms).await,
         Command::Peers | Command::Peer { .. } => execute_from_env(cli, client).await,
         Command::Init { .. } | Command::Join { .. } => execute_from_env(cli, client).await,
     }
@@ -527,7 +527,7 @@ fn discover(timeout_ms: u64) -> Result<String, CliError> {
     Ok(format_discover_response(discover_nodes(timeout_ms)?))
 }
 
-fn setup(timeout_ms: u64) -> Result<String, CliError> {
+async fn setup(client: &reqwest::Client, timeout_ms: u64) -> Result<String, CliError> {
     let path = default_config_path()?;
     let mut output = vec!["Hive setup".to_owned(), "".to_owned()];
     let mut config = match read_file_config(&path) {
@@ -555,7 +555,10 @@ fn setup(timeout_ms: u64) -> Result<String, CliError> {
     output.push(format_discover_response(nodes.clone()));
 
     if let Some(file_config) = config.as_mut() {
-        let added = merge_discovered_peers(file_config, &nodes);
+        let mut added = merge_discovered_peers(file_config, &nodes);
+        if let Ok(node_peers) = fetch_node_peers(client, file_config).await {
+            added += merge_peer_summaries(file_config, &node_peers, "node-discovery");
+        }
         if added > 0 {
             write_file_config(&path, file_config)?;
             output.push("".to_owned());
@@ -633,24 +636,40 @@ fn discover_nodes(timeout_ms: u64) -> Result<Vec<DiscoveredNode>, CliError> {
 }
 
 fn merge_discovered_peers(config: &mut FileConfig, nodes: &[DiscoveredNode]) -> usize {
-    let mut added = 0;
-    for node in nodes {
-        if node.node_url == config.node_url {
-            continue;
-        }
-        if let Some(existing) = config
-            .peers
-            .iter_mut()
-            .find(|peer| peer.node_id.as_deref() == Some(node.node_id.as_str()))
-        {
-            existing.node_url = node.node_url.clone();
-            continue;
-        }
-        config.peers.push(FilePeer {
+    let peers = nodes
+        .iter()
+        .map(|node| PeerSummary {
             node_url: node.node_url.clone(),
             node_id: Some(node.node_id.clone()),
             trusted: false,
-            source: "discovery".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    merge_peer_summaries(config, &peers, "discovery")
+}
+
+fn merge_peer_summaries(config: &mut FileConfig, peers: &[PeerSummary], source: &str) -> usize {
+    let mut added = 0;
+    for peer in peers {
+        let node_url = peer.node_url.trim_end_matches('/').to_owned();
+        if node_url == config.node_url {
+            continue;
+        }
+        let node_id = peer.node_id.clone();
+        if let Some(existing) = config.peers.iter_mut().find(|existing| {
+            existing.node_id.is_some() && existing.node_id == node_id
+                || existing.node_id.is_none() && existing.node_url == node_url
+        }) {
+            existing.node_url = node_url;
+            if existing.node_id.is_none() {
+                existing.node_id = node_id;
+            }
+            continue;
+        }
+        config.peers.push(FilePeer {
+            node_url,
+            node_id,
+            trusted: false,
+            source: source.to_owned(),
         });
         added += 1;
     }
@@ -707,9 +726,15 @@ fn format_discover_response(nodes: Vec<DiscoveredNode>) -> String {
     lines.join("\n")
 }
 
-fn list_peers() -> Result<String, CliError> {
+async fn list_peers(client: &reqwest::Client) -> Result<String, CliError> {
     let path = default_config_path()?;
-    let config = read_file_config(&path)?;
+    let mut config = read_file_config(&path)?;
+    if let Ok(node_peers) = fetch_node_peers(client, &config).await {
+        if merge_peer_summaries(&mut config, &node_peers, "node-discovery") > 0 {
+            write_file_config(&path, &config)?;
+        }
+    }
+
     if config.peers.is_empty() {
         return Ok("no peer candidates configured".to_owned());
     }
@@ -956,6 +981,26 @@ fn remember_request(text: &str, tags: Vec<String>) -> PublishObjectRequest {
         tags,
         references: Vec::new(),
     }
+}
+
+async fn fetch_node_peers(
+    client: &reqwest::Client,
+    config: &FileConfig,
+) -> Result<Vec<PeerSummary>, CliError> {
+    let runtime_config = Config {
+        node_url: config.node_url.clone(),
+        api_token: config.api_token.clone(),
+    };
+    let response = get(client, &runtime_config, "/v1/peers")
+        .await?
+        .json::<PeerListResponse>()
+        .await?;
+    Ok(response.peers)
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq)]
+struct PeerListResponse {
+    peers: Vec<PeerSummary>,
 }
 
 async fn get(

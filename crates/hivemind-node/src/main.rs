@@ -1,7 +1,7 @@
 use hivemind_adapters::{fs::FsContentStore, sqlite::SqliteMetadataStore};
 use hivemind_node::{
-    app, load_or_create_token, ApiConfig, AppState, FileIdentity, NodeConfig, PeerRecord,
-    SqliteNodeStateStore, SystemClock,
+    app, load_or_create_token, ApiConfig, AppState, FileIdentity, NodeConfig, PeerListResponse,
+    PeerRecord, SqliteNodeStateStore, SystemClock,
 };
 use std::{
     env,
@@ -126,6 +126,7 @@ async fn discovery_responder(
                     if let Some(peer_record) = parse_discovery_announcement(rest) {
                         if peer_record.node_id != node_id {
                             let _ = state_store.upsert_peer_candidate(&peer_record);
+                            gossip_peer_candidates(Arc::clone(&state_store), peer_record, node_id.clone());
                         }
                     }
                 }
@@ -151,6 +152,48 @@ async fn send_discovery_beacons(
         let response = format!("{DISCOVERY_RESPONSE_PREFIX}{node_url} {node_id}");
         let _ = socket.send_to(response.as_bytes(), target).await;
     }
+}
+
+fn gossip_peer_candidates(
+    state_store: Arc<SqliteNodeStateStore>,
+    peer: PeerRecord,
+    self_node_id: String,
+) {
+    tokio::spawn(async move {
+        if let Err(err) = fetch_and_store_peer_candidates(state_store, peer, self_node_id).await {
+            eprintln!("hivemind discovery peer gossip failed: {err}");
+        }
+    });
+}
+
+async fn fetch_and_store_peer_candidates(
+    state_store: Arc<SqliteNodeStateStore>,
+    peer: PeerRecord,
+    self_node_id: String,
+) -> Result<(), reqwest::Error> {
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/discovery/peers",
+            peer.node_url.trim_end_matches('/')
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<PeerListResponse>()
+        .await?;
+
+    for candidate in response.peers {
+        if candidate.node_id == self_node_id || candidate.node_id == peer.node_id {
+            continue;
+        }
+        let record = PeerRecord {
+            node_url: candidate.node_url,
+            node_id: candidate.node_id,
+            trusted: false,
+        };
+        let _ = state_store.upsert_peer_candidate(&record);
+    }
+    Ok(())
 }
 
 fn parse_discovery_announcement(input: &str) -> Option<PeerRecord> {

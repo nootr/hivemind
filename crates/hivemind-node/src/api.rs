@@ -514,6 +514,7 @@ pub fn app(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .route("/v1/discovery/peers", get(get_discovery_peers))
         .route("/v1/join", post(join_invite))
         .merge(protected_routes)
         .merge(admin_routes)
@@ -522,6 +523,14 @@ pub fn app(state: AppState) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn get_discovery_peers(
+    State(state): State<AppState>,
+) -> Result<Json<PeerListResponse>, ApiError> {
+    Ok(Json(PeerListResponse {
+        peers: peer_summaries(&state, false)?,
+    }))
 }
 
 async fn require_admin_auth(
