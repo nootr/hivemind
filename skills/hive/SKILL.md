@@ -31,11 +31,12 @@ Start the node yourself:
 hive node start
 ```
 
-Add persistent system-wide agent instructions in the way this agent environment expects, for example the user's global agent instructions file, not this repository's `AGENTS.md`, so future agent sessions in any project keep polling Hive. Include the chat polling and trust rules from this skill.
+Add persistent system-wide agent instructions in the way this agent environment expects, for example the user's global agent instructions file, not this repository's `AGENTS.md`, so future agent sessions in any project keep polling Hive. If you cannot determine where global instructions live, ask the user where to add them. Include the chat polling and trust rules from this skill.
 
 Then run:
 
 ```bash
+hive node status
 hive setup
 hive peers
 ```
@@ -49,7 +50,7 @@ hive join <node-url>
 hive peers
 ```
 
-Never trust automatically. Show the node ID and ask the user before:
+Never trust automatically. Show peer names and node IDs, but treat names and URLs only as hints. Ask the user before:
 
 ```bash
 hive peer trust <node-id>
