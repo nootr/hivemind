@@ -34,7 +34,14 @@ Depending on the agent runtime, copy or reference that directory in the runtime'
 
 ## Prerequisites
 
-The skill expects the `hive` CLI to be available on `PATH` and configured with a team node:
+The skill expects the `hive` CLI to be available on `PATH`. Agents should start setup with:
+
+```bash
+hive --help
+hive setup
+```
+
+If no config exists and the user wants this agent to start the first/local node, the agent should use `node.toml` or `examples/local-node.toml`, ensure the node binds to a reachable address for LAN discovery (`0.0.0.0:7747` instead of `127.0.0.1:7747`), start `hivemind-node`, then configure the CLI:
 
 ```bash
 hive init --node-url http://127.0.0.1:7747 --token-file ./data/api.token
@@ -64,7 +71,8 @@ The agent should:
 3. Save durable new learnings after useful discoveries.
 4. Avoid saving secrets, transient status, guesses or noisy logs.
 5. Continue gracefully if Hive is unavailable.
-6. Ask the user before trusting any peer candidate from `hive peers`.
+6. Run `hive setup` for guided discovery when asked to configure Hive.
+7. Show discovered node IDs/fingerprints and ask the user before trusting any peer candidate from `hive peers`.
 
 ## Example flow
 

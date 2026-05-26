@@ -11,30 +11,45 @@ The user-facing concept is `/hive`. The concrete tool for this skill is the `hiv
 
 ## Setup check
 
-Before first use in a workspace, verify the CLI is available and configured for the team node:
+Before first use in a workspace, verify the CLI is available and run guided setup:
 
 ```bash
 hive --help
+hive setup
 ```
 
-The CLI needs either local config from:
+If `hive setup` reports no local config and the user wants this agent to start the first/local node, guide or perform these steps:
 
-```bash
-hive init --node-url http://127.0.0.1:7747 --token-file ./data/api.token
-```
+1. Ensure a node config exists. Prefer an existing `node.toml`; otherwise use `examples/local-node.toml` as the template.
+2. For colleague/LAN discovery, the node must listen on a reachable address, for example:
+   ```toml
+   [api]
+   bind_addr = "0.0.0.0:7747"
+   auth_token_file = "./data/api.token"
+   ```
+   Keep `127.0.0.1:7747` only for same-machine tests.
+3. Start the node and keep it running:
+   ```bash
+   cargo run -p hivemind-node -- --config node.toml
+   ```
+4. In another shell/session, configure the CLI with the local admin token file:
+   ```bash
+   hive init --node-url http://127.0.0.1:7747 --token-file ./data/api.token
+   ```
+5. Run `hive setup` again. It should discover local/team nodes and store discovered nodes as untrusted peer candidates when config exists.
 
-or temporary environment variables:
+Temporary environment variables are also supported:
 
 ```bash
 HIVEMIND_NODE_URL
 HIVEMIND_API_TOKEN
 ```
 
-If the CLI is missing or not configured, explain exactly what is missing and mention `hive init`. Stop; do not invent memory results.
+If setup cannot be completed, explain exactly what is missing. Stop; do not invent memory results.
 
 ### Peer trust
 
-`hive discover` may find local Hive nodes and `hive join` may store peer node IDs/public-key fingerprints as untrusted candidates. Discovery is not trust. Never trust peers automatically. If trusting a peer seems useful, ask the user first and only run `hive peer trust <node-id>` after explicit approval.
+`hive setup` / `hive discover` may find local Hive nodes and store peer node IDs/public-key fingerprints as untrusted candidates. Discovery is not trust and does not grant access. Never trust peers automatically. Show the user the discovered node URL and node ID/fingerprint, ask them to compare it with their teammate out-of-band, and only run `hive peer trust <node-id>` after explicit approval.
 
 ### Register that Hive is available
 
