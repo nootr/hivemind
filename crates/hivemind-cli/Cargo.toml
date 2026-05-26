@@ -10,8 +10,8 @@ name = "hive"
 path = "src/main.rs"
 
 [dependencies]
-base64.workspace = true
 clap.workspace = true
+hivemind-core = { path = "../hivemind-core" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

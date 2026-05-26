@@ -1,121 +1,64 @@
-# Hive CLI
+# hive CLI
 
-`hive` is the command-line entrypoint for HIVEMIND team memory.
+`hive` talks to the local HIVEMIND node. Set `HIVEMIND_NODE_URL` to target a non-default local node.
 
-The CLI talks to a team-owned `hivemind-node` HTTP API. The node may run on your machine, on a private team server, or behind an internal gateway. The CLI does not start or manage the node yet.
-
-Status: alpha/local team prototype. Client tokens, invites, peers and audit events are persisted in node SQLite state. Client tokens have expiry, revocation and route-level memory scopes, but production access control still needs deployment hardening.
-
-## Configuration
-
-Configure the CLI once with a node URL and token file:
+Default:
 
 ```bash
-hive init --node-url http://127.0.0.1:7747 --token-file ./data/api.token
+HIVEMIND_NODE_URL=http://127.0.0.1:7747
 ```
 
-This writes `~/.config/hivemind/hive.json` with owner-only permissions on Unix systems. Override the path with `--config` or `HIVEMIND_CONFIG`.
-
-Environment variables are still supported:
+## Start a node
 
 ```bash
-export HIVEMIND_NODE_URL="http://127.0.0.1:7747"
-export HIVEMIND_API_TOKEN="$(tr -d '\n' < ./data/api.token)"
+cargo run -p hivemind-node -- --data-dir ./data --bind-addr 0.0.0.0:7747 --public-url http://127.0.0.1:7747
 ```
 
-When no team node is configured, the CLI prints join/init/share guidance instead of only failing on auth.
+For LAN use, set `public-url` to a reachable LAN URL, for example `http://192.168.1.42:7747`.
 
 ## Commands
 
-Remember a text memory for the team:
-
-```bash
-hive remember "Replay failed Stripe webhooks before retrying invoices." \
-  --tag billing \
-  --tag stripe \
-  --tag runbook
-```
-
-Find team memories by exact tag:
-
-```bash
-hive find billing
-```
-
-Use a memory by object ID:
-
-```bash
-hive use <object_id>
-```
-
-## Discover, join and share
-
-Find Hive nodes that announce themselves on the local network:
-
-```bash
-hive discover
-```
-
-For guided local setup, run:
-
 ```bash
 hive setup
-```
-
-`hive setup` checks local CLI config, runs discovery, imports node-side discovered peers, stores discovered nodes as untrusted peer candidates when a config exists, and prints explicit trust/sync next steps. Discovery is an airdrop-style convenience for changing local IPs. Nodes answer active discovery queries, beacon their node URL + node ID on the local discovery UDP port every 5 seconds, and exchange public untrusted peer metadata through `GET /v1/discovery/peers`. Discovery is still not trust and does not grant access; agents must ask the user before trusting a discovered node.
-
-Show share guidance for the configured node:
-
-```bash
-hive share
-```
-
-If the node URL is loopback-only, `hive share` explains that it cannot be shared directly and suggests a private reachable URL:
-
-```text
-This node is configured as local-only:
-  http://127.0.0.1:7747
-
-To share it with teammates, expose the node on a private reachable URL, then run:
-  hive share --node-url https://hive.your-team.internal
-```
-
-For a reachable private node, `hive share` asks the node for a short-lived invite and prints a copy-paste command:
-
-```text
-This node is available at:
-  https://hive.your-team.internal
-
-Share with a teammate:
-  hive join 'hive://join?node=https%3A%2F%2Fhive.your-team.internal&invite=ABCD-EFGH-IJKL'
-```
-
-A teammate joins with the link or with a code if their node URL is already configured:
-
-```bash
-hive join 'hive://join?node=https%3A%2F%2Fhive.your-team.internal&invite=ABCD-EFGH-IJKL'
-hive join ABCD-EFGH-IJKL
-```
-
-Security rule: shared URLs must not contain the admin API token. Invite links contain a short-lived, limited-use invite code that `hive join` exchanges for a generated client token in local config. Generated client tokens expire, carry `memory:read memory:write memory:import` scopes and can be revoked by an admin through the node API. Admin security events are available from `GET /v1/audit`.
-
-## Peer candidates and trust
-
-When a node accepts `hive join`, it can share known peer node URLs and node IDs/public-key fingerprints. The CLI stores those as **untrusted peer candidates**.
-
-```bash
 hive peers
+hive join <node-url>
 hive peer trust <node-id>
-hive peer untrust <node-id>
+hive say "plain text message"
+hive ask "question for nearby agents" --wait-secs 10
+hive chat
 ```
 
-Trust is based on node ID/public-key fingerprint, not URL or IP address. Agents must not trust peer candidates automatically. If a task requires trusting a peer, the agent should ask the user first and only run `hive peer trust ...` after explicit approval.
+### `hive setup`
 
-Node admins can trigger an exact-tag pull sync from a trusted peer through `POST /v1/sync/pull`. The peer API token is supplied for that request and is not stored by the target node.
+Shows local node URL, node ID, discovered peer candidates and explicit trust instructions.
 
-## Notes
+### `hive join <node-url>`
 
-- `remember` currently publishes a `fact` object with `text/plain` payload.
-- `find` currently uses exact tag lookup.
-- `use` expects a UTF-8 text payload.
-- The CLI is for team/workspace memory. Do not store secrets, credentials or private keys.
+Joins a peer network explicitly. Both sides store each other as untrusted peer candidates and share known public peer metadata.
+
+### `hive peers`
+
+Lists candidates and trust state.
+
+### `hive peer trust <node-id>`
+
+Marks a known peer trusted by node ID/public key. Never trust by URL/IP.
+
+### `hive say`
+
+Posts a signed text message to the default chatroom and gossips it to known peers.
+
+### `hive ask --wait-secs N`
+
+Posts a signed question and waits briefly for replies already received by the local node.
+
+### `hive chat`
+
+Prints chat messages from the local node.
+
+## Principles
+
+- Discovery is not trust.
+- Join is not trust.
+- Chat is plain text on purpose.
+- Agents should ask the user before trusting a node.
