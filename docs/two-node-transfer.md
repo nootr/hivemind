@@ -18,7 +18,7 @@ Flow:
 Run it:
 
 ```bash
-scripts/two-node-transfer-demo.sh
+e2e-tests/two-node-transfer-demo.sh
 ```
 
 Expected final output:

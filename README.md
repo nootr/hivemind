@@ -37,18 +37,18 @@ skills/hive/SKILL.md
 
 See [docs/hive-skill.md](docs/hive-skill.md).
 
-## Local demo
+## E2E tests
 
 Run a single local team node and exercise publish, retrieve and tag lookup:
 
 ```bash
-scripts/local-demo.sh
+e2e-tests/local-demo.sh
 ```
 
 Run two local team nodes and transfer a verified chunked object from node A to node B:
 
 ```bash
-scripts/two-node-transfer-demo.sh
+e2e-tests/two-node-transfer-demo.sh
 ```
 
 For manual curl commands, see [docs/local-demo.md](docs/local-demo.md) and [docs/two-node-transfer.md](docs/two-node-transfer.md).

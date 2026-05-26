@@ -11,9 +11,9 @@ echo "==> cargo test --workspace"
 cargo test --workspace
 
 shopt -s nullglob
-for script in ./scripts/*.sh; do
-  echo "==> ${script}"
-  "${script}"
+for test_script in ./e2e-tests/*.sh; do
+  echo "==> ${test_script}"
+  "${test_script}"
 done
 shopt -u nullglob
 

@@ -230,10 +230,10 @@ curl -sS \
   http://127.0.0.1:7747/v1/peers
 ```
 
-## Smoke test
+## E2E test
 
 Run the full local demo automatically:
 
 ```bash
-scripts/local-demo.sh
+e2e-tests/local-demo.sh
 ```
