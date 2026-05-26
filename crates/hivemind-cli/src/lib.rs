@@ -1,7 +1,12 @@
 use clap::{Parser, Subcommand};
 use hivemind_core::{valid_node_id, ChatMessage, PeerInfo, PeerRecord};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, env, fs, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const DEFAULT_NODE_URL: &str = "http://127.0.0.1:7747";
 
@@ -16,6 +21,10 @@ pub struct Cli {
 pub enum Command {
     Setup,
     Peers,
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
+    },
     Join {
         node_url: String,
     },
@@ -44,6 +53,22 @@ pub enum Command {
 }
 
 #[derive(Debug, Subcommand, Eq, PartialEq)]
+pub enum NodeCommand {
+    Init {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        #[arg(long, default_value = "0.0.0.0:7747")]
+        bind_addr: String,
+        #[arg(long, default_value = "http://127.0.0.1:7747")]
+        public_url: String,
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand, Eq, PartialEq)]
 pub enum PeerCommand {
     Trust { node_id: String },
 }
@@ -60,6 +85,8 @@ pub enum CliError {
     InvalidNodeId,
     #[error("peer not found")]
     PeerNotFound,
+    #[error("could not determine home directory; pass --config and --data-dir")]
+    HomeDir,
 }
 
 #[derive(Debug, Serialize)]
@@ -95,6 +122,15 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
     match cli.command {
         Command::Setup => setup(client).await,
         Command::Peers => peers(client).await,
+        Command::Node { command } => match command {
+            NodeCommand::Init {
+                config,
+                data_dir,
+                bind_addr,
+                public_url,
+                force,
+            } => node_init(config, data_dir, &bind_addr, &public_url, force),
+        },
         Command::Join { node_url } => join(client, &node_url).await,
         Command::Peer { command } => match command {
             PeerCommand::Trust { node_id } => trust_peer(client, &node_id).await,
@@ -107,6 +143,53 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
         } => ask(client, &text, &room, wait_secs).await,
         Command::Chat { room, after_ms } => chat(client, &room, after_ms).await,
     }
+}
+
+fn node_init(
+    config: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+    bind_addr: &str,
+    public_url: &str,
+    force: bool,
+) -> Result<String, CliError> {
+    let (config, data_dir) = match (config, data_dir) {
+        (Some(config), Some(data_dir)) => (config, data_dir),
+        (config, data_dir) => {
+            let home = home_dir()?;
+            (
+                config.unwrap_or_else(|| home.join(".hivemind/node.toml")),
+                data_dir.unwrap_or_else(|| home.join(".hivemind/data")),
+            )
+        }
+    };
+
+    if config.exists() && !force {
+        return Ok(format!(
+            "node config already exists: {}\nstart node:\n  hivemind-node --config {}\nthen run:\n  hive setup",
+            config.display(),
+            config.display()
+        ));
+    }
+
+    if let Some(parent) = config.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::create_dir_all(&data_dir)?;
+    fs::write(
+        &config,
+        format!(
+            "data_dir = \"{}\"\nbind_addr = \"{}\"\npublic_url = \"{}\"\n",
+            toml_escape_path(&data_dir),
+            toml_escape(bind_addr),
+            toml_escape(public_url)
+        ),
+    )?;
+
+    Ok(format!(
+        "wrote node config: {}\nstart node:\n  hivemind-node --config {}\nthen run:\n  hive setup",
+        config.display(),
+        config.display()
+    ))
 }
 
 async fn setup(client: &reqwest::Client) -> Result<String, CliError> {
@@ -315,6 +398,21 @@ fn format_message(message: &ChatMessage, authors: &BTreeMap<String, String>) -> 
     )
 }
 
+fn home_dir() -> Result<PathBuf, CliError> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or(CliError::HomeDir)
+}
+
+fn toml_escape_path(path: &Path) -> String {
+    toml_escape(&path.display().to_string())
+}
+
+fn toml_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn node_url() -> String {
     env::var("HIVEMIND_NODE_URL").unwrap_or_else(|_| DEFAULT_NODE_URL.to_owned())
 }
@@ -366,6 +464,50 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn parses_node_init() {
+        assert_eq!(
+            Cli::parse_from([
+                "hive",
+                "node",
+                "init",
+                "--public-url",
+                "http://127.0.0.1:18888"
+            ]),
+            Cli {
+                command: Command::Node {
+                    command: NodeCommand::Init {
+                        config: None,
+                        data_dir: None,
+                        bind_addr: "0.0.0.0:7747".to_owned(),
+                        public_url: "http://127.0.0.1:18888".to_owned(),
+                        force: false,
+                    }
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn node_init_writes_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("node.toml");
+        let data_dir = dir.path().join("data");
+        let output = node_init(
+            Some(config.clone()),
+            Some(data_dir.clone()),
+            "127.0.0.1:18888",
+            "http://127.0.0.1:18888",
+            false,
+        )
+        .unwrap();
+        assert!(output.contains("hivemind-node --config"));
+        let written = fs::read_to_string(config).unwrap();
+        assert!(written.contains(&format!("data_dir = \"{}\"", data_dir.display())));
+        assert!(written.contains("bind_addr = \"127.0.0.1:18888\""));
+        assert!(written.contains("public_url = \"http://127.0.0.1:18888\""));
     }
 
     #[test]

@@ -16,27 +16,36 @@ No automatic trust. No token economy. No object/chunk memory protocol. The chatr
 
 ## Quickstart
 
-Start a local node:
+Install from source with the installer:
 
 ```bash
-cargo run -p hivemind-node -- --data-dir ./data --bind-addr 0.0.0.0:7747 --public-url http://127.0.0.1:7747
+curl -fsSL https://raw.githubusercontent.com/nootr/hivemind/main/install.sh | sh
+```
+
+Review `install.sh` first if you prefer. It uses `cargo install --git`, so Rust/Cargo is required.
+
+Create local node config and start the node:
+
+```bash
+hive node init
+hivemind-node --config ~/.hivemind/node.toml
 ```
 
 In another shell:
 
 ```bash
-cargo run -p hivemind-cli -- setup
-cargo run -p hivemind-cli -- peers
-cargo run -p hivemind-cli -- chat
-cargo run -p hivemind-cli -- ask "What should future agents know about this repo?" --wait-secs 10
-cargo run -p hivemind-cli -- say "Repo tip: keep changes small and tested."
+hive setup
+hive peers
+hive chat
+hive ask "What should future agents know about this repo?" --wait-secs 10
+hive say "Repo tip: keep changes small and tested."
 ```
 
 Join another node explicitly:
 
 ```bash
-cargo run -p hivemind-cli -- join http://192.168.1.42:7747
-cargo run -p hivemind-cli -- peer trust <node-id>
+hive join http://192.168.1.42:7747
+hive peer trust <node-id>
 ```
 
 Discovery and join only create untrusted peer candidates. Compare node IDs out-of-band before trusting.
