@@ -58,13 +58,15 @@ if HIVEMIND_NODE_URL=http://127.0.0.1:17748 cargo run --quiet -p hivemind-cli --
   exit 1
 fi
 
+NODE_A_ID="$(curl -fsS http://127.0.0.1:17747/v1/node | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"])')"
 NODE_B_ID="$(curl -fsS http://127.0.0.1:17748/v1/node | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"])')"
 HIVEMIND_NODE_URL=http://127.0.0.1:17747 cargo run --quiet -p hivemind-cli -- peer trust "${NODE_B_ID}" >/dev/null
+HIVEMIND_NODE_URL=http://127.0.0.1:17748 cargo run --quiet -p hivemind-cli -- peer trust "${NODE_A_ID}" >/dev/null
 
-HIVEMIND_NODE_URL=http://127.0.0.1:17747 cargo run --quiet -p hivemind-cli -- say "hello from trusted node a" >/dev/null
+HIVEMIND_NODE_URL=http://127.0.0.1:17747 cargo run --quiet -p hivemind-cli -- say "hello from mutually trusted node a" >/dev/null
 
 for _ in $(seq 1 40); do
-  if HIVEMIND_NODE_URL=http://127.0.0.1:17748 cargo run --quiet -p hivemind-cli -- chat | grep "hello from trusted node a" >/dev/null; then
+  if HIVEMIND_NODE_URL=http://127.0.0.1:17748 cargo run --quiet -p hivemind-cli -- chat | grep "hello from mutually trusted node a" >/dev/null; then
     echo "two-node chat ok"
     exit 0
   fi

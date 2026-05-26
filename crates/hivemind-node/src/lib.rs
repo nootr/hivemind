@@ -54,6 +54,8 @@ pub enum ApiError {
     NotFound,
     #[error("invalid request")]
     InvalidRequest,
+    #[error("forbidden")]
+    Forbidden,
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -63,6 +65,7 @@ impl IntoResponse for ApiError {
         let status = match self {
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::InvalidRequest => StatusCode::BAD_REQUEST,
+            ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, self.to_string()).into_response()
@@ -249,6 +252,11 @@ async fn import_message(
     Json(message): Json<ChatMessage>,
 ) -> Result<Json<ChatMessage>, ApiError> {
     message.verify().map_err(|_| ApiError::InvalidRequest)?;
+    if message.author_node_id != state.key.node_id()
+        && !trusted_author(&state, &message.author_node_id)
+    {
+        return Err(ApiError::Forbidden);
+    }
     store_message(&state, message.clone())?;
     Ok(Json(message))
 }
@@ -425,6 +433,17 @@ fn gossip_message(state: AppState, message: ChatMessage) {
                 .await;
         }
     });
+}
+
+fn trusted_author(state: &AppState, node_id: &str) -> bool {
+    state
+        .store
+        .peers
+        .lock()
+        .expect("peer lock")
+        .get(node_id)
+        .map(|peer| peer.trusted)
+        .unwrap_or(false)
 }
 
 fn trusted_peers(state: &AppState) -> Vec<PeerRecord> {
@@ -696,6 +715,64 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let peer: PeerRecord = serde_json::from_slice(&bytes).unwrap();
         assert!(peer.trusted);
+    }
+
+    #[tokio::test]
+    async fn import_rejects_untrusted_author() {
+        let state = test_state();
+        let author = NodeKey::from_seed_hex(&"02".repeat(32)).unwrap();
+        let message = author.sign_chat("default", 123, "hello");
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/import")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&message).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn import_accepts_trusted_author() {
+        let state = test_state();
+        let author = NodeKey::from_seed_hex(&"02".repeat(32)).unwrap();
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://peer".to_owned(),
+                node_id: author.node_id(),
+            },
+            "test",
+        );
+        state
+            .store
+            .peers
+            .lock()
+            .unwrap()
+            .get_mut(&author.node_id())
+            .unwrap()
+            .trusted = true;
+        let message = author.sign_chat("default", 123, "hello");
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/import")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&message).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
