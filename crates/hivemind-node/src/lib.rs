@@ -8,9 +8,9 @@ mod token;
 pub use api::{
     app, ApiConfig, ApiError, AppState, ErrorBody, ErrorDetails, ErrorResponse, GetChunkResponse,
     GetObjectEnvelopeResponse, GetObjectResponse, ImportObjectEnvelopeRequest,
-    ImportObjectEnvelopeResponse, ObjectSummary, PublishObjectRequest, PublishObjectResponse,
-    PutChunkRequest, PutChunkResponse, ReferrersResponse, SystemClock, TagLookupResponse,
-    TransferChunk,
+    ImportObjectEnvelopeResponse, ObjectSummary, PlanObjectEnvelopeImportRequest,
+    PlanObjectEnvelopeImportResponse, PublishObjectRequest, PublishObjectResponse, PutChunkRequest,
+    PutChunkResponse, ReferrersResponse, SystemClock, TagLookupResponse, TransferChunk,
 };
 pub use config::{ApiFileConfig, ConfigError, DataConfig, IdentityConfig, NodeConfig};
 pub use dev_identity::DevIdentity;

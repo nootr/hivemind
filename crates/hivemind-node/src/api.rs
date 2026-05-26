@@ -60,6 +60,30 @@ pub struct ImportObjectEnvelopeResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PlanObjectEnvelopeImportRequest {
+    pub envelope_cbor_base64: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct PlanObjectEnvelopeImportResponse {
+    pub object_id: String,
+    pub object_type: String,
+    pub author_agent_id: String,
+    pub created_at_ms: u64,
+    pub mime_type: String,
+    pub tags: Vec<String>,
+    pub references: Vec<String>,
+    pub payload_size: u64,
+    pub chunk_count: u32,
+    pub chunk_ids: Vec<String>,
+    pub chunks: Vec<TransferChunk>,
+    pub missing_chunk_ids: Vec<String>,
+    pub already_stored: bool,
+    pub importable: bool,
+    pub verified: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PutChunkRequest {
     pub bytes_base64: String,
 }
@@ -271,6 +295,10 @@ pub fn app(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/v1/objects", post(publish_object))
         .route("/v1/objects/envelope", post(import_object_envelope))
+        .route(
+            "/v1/objects/envelope/plan",
+            post(plan_object_envelope_import),
+        )
         .route("/v1/objects/{object_id}", get(get_object))
         .route("/v1/objects/{object_id}/envelope", get(get_object_envelope))
         .route("/v1/objects/{object_id}/referrers", get(get_referrers))
@@ -368,14 +396,7 @@ async fn import_object_envelope(
     State(state): State<AppState>,
     Json(request): Json<ImportObjectEnvelopeRequest>,
 ) -> Result<Json<ImportObjectEnvelopeResponse>, ApiError> {
-    let envelope_bytes = STANDARD
-        .decode(request.envelope_cbor_base64.as_bytes())
-        .map_err(|_| ApiError::InvalidBase64)?;
-    let envelope: ObjectEnvelope =
-        minicbor::decode(&envelope_bytes).map_err(|_| ApiError::InvalidObjectEnvelope)?;
-    envelope
-        .verify()
-        .map_err(|_| ApiError::InvalidObjectEnvelope)?;
+    let envelope = parse_verified_envelope_base64(&request.envelope_cbor_base64)?;
     ensure_chunks_available(&state.content_store, &envelope.body.payload).await?;
 
     state
@@ -398,6 +419,45 @@ async fn import_object_envelope(
     Ok(Json(ImportObjectEnvelopeResponse {
         object_id: envelope.object_id.to_string(),
         chunk_ids: chunk_ids_from_payload(&envelope.body.payload),
+    }))
+}
+
+async fn plan_object_envelope_import(
+    State(state): State<AppState>,
+    Json(request): Json<PlanObjectEnvelopeImportRequest>,
+) -> Result<Json<PlanObjectEnvelopeImportResponse>, ApiError> {
+    let envelope = parse_verified_envelope_base64(&request.envelope_cbor_base64)?;
+    let missing_chunk_ids =
+        missing_chunk_ids_for_payload(&state.content_store, &envelope.body.payload).await?;
+    let already_stored = state
+        .content_store
+        .has_object(envelope.object_id)
+        .await
+        .map_err(|err| ApiError::App(err.to_string()))?;
+    let (mime_type, payload_size, chunk_count) = payload_metadata(&envelope.body.payload);
+    let importable = missing_chunk_ids.is_empty();
+
+    Ok(Json(PlanObjectEnvelopeImportResponse {
+        object_id: envelope.object_id.to_string(),
+        object_type: object_kind_to_str(envelope.body.kind).to_owned(),
+        author_agent_id: envelope.body.author.to_string(),
+        created_at_ms: envelope.body.created_at_ms,
+        mime_type,
+        tags: envelope.body.tags.clone(),
+        references: envelope
+            .body
+            .references
+            .iter()
+            .map(|object_id| object_id.to_string())
+            .collect(),
+        payload_size,
+        chunk_count,
+        chunk_ids: chunk_ids_from_payload(&envelope.body.payload),
+        chunks: transfer_chunks_from_payload(&envelope.body.payload),
+        missing_chunk_ids,
+        already_stored,
+        importable,
+        verified: true,
     }))
 }
 
@@ -629,8 +689,21 @@ async fn ensure_chunks_available(
     store: &FsContentStore,
     payload: &Payload,
 ) -> Result<(), ApiError> {
+    let missing_chunk_ids = missing_chunk_ids_for_payload(store, payload).await?;
+    if !missing_chunk_ids.is_empty() {
+        return Err(ApiError::MissingObjectChunks {
+            chunk_ids: missing_chunk_ids,
+        });
+    }
+    Ok(())
+}
+
+async fn missing_chunk_ids_for_payload(
+    store: &FsContentStore,
+    payload: &Payload,
+) -> Result<Vec<String>, ApiError> {
+    let mut missing_chunk_ids = Vec::new();
     if let Payload::Chunked(chunked) = payload {
-        let mut missing_chunk_ids = Vec::new();
         for chunk in &chunked.chunks {
             let bytes = match store.get_chunk(chunk.chunk_id).await {
                 Ok(bytes) => bytes,
@@ -649,13 +722,20 @@ async fn ensure_chunks_available(
                 return Err(ApiError::InvalidChunkContent);
             }
         }
-        if !missing_chunk_ids.is_empty() {
-            return Err(ApiError::MissingObjectChunks {
-                chunk_ids: missing_chunk_ids,
-            });
-        }
     }
-    Ok(())
+    Ok(missing_chunk_ids)
+}
+
+fn parse_verified_envelope_base64(envelope_cbor_base64: &str) -> Result<ObjectEnvelope, ApiError> {
+    let envelope_bytes = STANDARD
+        .decode(envelope_cbor_base64.as_bytes())
+        .map_err(|_| ApiError::InvalidBase64)?;
+    let envelope: ObjectEnvelope =
+        minicbor::decode(&envelope_bytes).map_err(|_| ApiError::InvalidObjectEnvelope)?;
+    envelope
+        .verify()
+        .map_err(|_| ApiError::InvalidObjectEnvelope)?;
+    Ok(envelope)
 }
 
 fn fs_write_error(err: hivemind_adapters::fs::FsStoreError) -> ApiError {
@@ -1428,6 +1508,140 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn plan_inline_envelope_import_reports_importable_without_storing() {
+        let source_tempdir = tempfile::tempdir().unwrap();
+        let target_tempdir = tempfile::tempdir().unwrap();
+        let source_app = test_app(&source_tempdir);
+        let target_app = test_app(&target_tempdir);
+
+        let response = source_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "text/plain",
+                    "payload_base64": STANDARD.encode(b"hello"),
+                    "tags": ["planned"]
+                }),
+            ))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+        let response = source_app
+            .router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{}/envelope",
+                published.object_id
+            )))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let envelope: GetObjectEnvelopeResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = target_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects/envelope/plan",
+                serde_json::json!({
+                    "envelope_cbor_base64": envelope.envelope_cbor_base64
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let plan: PlanObjectEnvelopeImportResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(plan.object_id, published.object_id);
+        assert_eq!(plan.object_type, "fact");
+        assert_eq!(plan.mime_type, "text/plain");
+        assert_eq!(plan.tags, vec!["planned"]);
+        assert_eq!(plan.payload_size, 5);
+        assert_eq!(plan.chunk_count, 0);
+        assert!(plan.chunk_ids.is_empty());
+        assert!(plan.chunks.is_empty());
+        assert!(plan.missing_chunk_ids.is_empty());
+        assert!(!plan.already_stored);
+        assert!(plan.importable);
+        assert!(plan.verified);
+
+        let response = target_app
+            .router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{}",
+                published.object_id
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn plan_chunked_envelope_import_reports_missing_chunks() {
+        let source_tempdir = tempfile::tempdir().unwrap();
+        let target_tempdir = tempfile::tempdir().unwrap();
+        let source_app = test_app(&source_tempdir);
+        let target_app = test_app(&target_tempdir);
+        let payload = vec![7_u8; hivemind_core::DEFAULT_CHUNK_SIZE + 1];
+
+        let response = source_app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "application/octet-stream",
+                    "payload_base64": STANDARD.encode(&payload),
+                    "tags": []
+                }),
+            ))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(published.chunk_ids.len() > 1);
+        let response = source_app
+            .router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{}/envelope",
+                published.object_id
+            )))
+            .await
+            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let envelope: GetObjectEnvelopeResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = target_app
+            .router
+            .oneshot(authorized_json_request(
+                "/v1/objects/envelope/plan",
+                serde_json::json!({
+                    "envelope_cbor_base64": envelope.envelope_cbor_base64
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let plan: PlanObjectEnvelopeImportResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(plan.object_id, published.object_id);
+        assert_eq!(plan.payload_size, payload.len() as u64);
+        assert_eq!(plan.chunk_count, published.chunk_ids.len() as u32);
+        assert_eq!(plan.chunk_ids, published.chunk_ids);
+        assert_eq!(plan.chunks, envelope.chunks);
+        assert_eq!(plan.missing_chunk_ids, published.chunk_ids);
+        assert!(!plan.already_stored);
+        assert!(!plan.importable);
+        assert!(plan.verified);
     }
 
     #[tokio::test]

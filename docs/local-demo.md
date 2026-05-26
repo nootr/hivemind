@@ -97,6 +97,18 @@ curl -sS \
 
 The response includes object summary metadata, base64 deterministic-CBOR envelope bytes, transfer `chunk_ids`, chunk metadata (`chunks`) and `verified: true`.
 
+Before importing an envelope, a receiver can ask the local node which chunks are still missing:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"envelope_cbor_base64":"..."}' \
+  "http://127.0.0.1:7747/v1/objects/envelope/plan"
+```
+
+The response verifies the envelope and returns summary metadata, transfer chunks, `missing_chunk_ids`, `already_stored` and `importable`.
+
 ## Find by exact tag
 
 ```bash

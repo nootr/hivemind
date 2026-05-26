@@ -141,16 +141,40 @@ log "exporting object envelope from node A"
 ENVELOPE_RESPONSE="$(curl --silent --fail \
   -H "Authorization: Bearer ${NODE_A_TOKEN}" \
   "http://127.0.0.1:17747/v1/objects/${OBJECT_ID}/envelope")"
-mapfile -t TRANSFER_CHUNKS < <(ENVELOPE_RESPONSE="${ENVELOPE_RESPONSE}" python3 - <<'PY'
+
+IMPORT_ENVELOPE_BODY="$(ENVELOPE_RESPONSE="${ENVELOPE_RESPONSE}" python3 - <<'PY'
 import json
 import os
 envelope = json.loads(os.environ["ENVELOPE_RESPONSE"])
+print(json.dumps({"envelope_cbor_base64": envelope["envelope_cbor_base64"]}))
+PY
+)"
+
+log "planning envelope import on node B"
+PLAN_RESPONSE="$(curl --silent --fail \
+  -H "Authorization: Bearer ${NODE_B_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "${IMPORT_ENVELOPE_BODY}" \
+  http://127.0.0.1:17748/v1/objects/envelope/plan)"
+
+mapfile -t TRANSFER_CHUNKS < <(ENVELOPE_RESPONSE="${ENVELOPE_RESPONSE}" PLAN_RESPONSE="${PLAN_RESPONSE}" python3 - <<'PY'
+import json
+import os
+envelope = json.loads(os.environ["ENVELOPE_RESPONSE"])
+plan = json.loads(os.environ["PLAN_RESPONSE"])
 assert envelope["object_type"] == "fact"
 assert envelope["mime_type"] == "application/octet-stream"
 assert envelope["tags"] == ["two-node", "transfer"]
 assert envelope["payload_size"] == len(b"two node transfer payload:") + 64 * 1024 + 1
 assert envelope["chunk_count"] == len(envelope["chunks"])
 assert envelope["chunk_ids"] == [chunk["chunk_id"] for chunk in envelope["chunks"]]
+assert plan["object_id"] == envelope["object_id"]
+assert plan["chunk_ids"] == envelope["chunk_ids"]
+assert plan["chunks"] == envelope["chunks"]
+assert plan["missing_chunk_ids"] == envelope["chunk_ids"]
+assert plan["already_stored"] is False
+assert plan["importable"] is False
+assert plan["verified"] is True
 for chunk in envelope["chunks"]:
     print(chunk["index"], chunk["chunk_id"], chunk["size"])
 PY
@@ -190,13 +214,22 @@ PY
     "http://127.0.0.1:17748/v1/chunks/${CHUNK_ID}" >/dev/null
 done
 
-IMPORT_ENVELOPE_BODY="$(ENVELOPE_RESPONSE="${ENVELOPE_RESPONSE}" python3 - <<'PY'
+log "planning envelope import on node B after chunk transfer"
+READY_PLAN_RESPONSE="$(curl --silent --fail \
+  -H "Authorization: Bearer ${NODE_B_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "${IMPORT_ENVELOPE_BODY}" \
+  http://127.0.0.1:17748/v1/objects/envelope/plan)"
+
+READY_PLAN_RESPONSE="${READY_PLAN_RESPONSE}" python3 - <<'PY'
 import json
 import os
-envelope = json.loads(os.environ["ENVELOPE_RESPONSE"])
-print(json.dumps({"envelope_cbor_base64": envelope["envelope_cbor_base64"]}))
+plan = json.loads(os.environ["READY_PLAN_RESPONSE"])
+assert plan["missing_chunk_ids"] == []
+assert plan["already_stored"] is False
+assert plan["importable"] is True
+assert plan["verified"] is True
 PY
-)"
 
 log "importing envelope into node B"
 IMPORT_RESPONSE="$(curl --silent --fail \
