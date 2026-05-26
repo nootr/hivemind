@@ -73,6 +73,7 @@ pub enum NodeCommand {
         #[arg(long)]
         log: Option<PathBuf>,
     },
+    Status,
 }
 
 #[derive(Debug, Subcommand, Eq, PartialEq)]
@@ -106,6 +107,8 @@ struct SayRequest<'a> {
 struct NodeInfoResponse {
     node_url: String,
     node_id: String,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,7 +140,8 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
                 public_url,
                 force,
             } => node_init(config, data_dir, &bind_addr, public_url.as_deref(), force),
-            NodeCommand::Start { config, log } => node_start(config, log),
+            NodeCommand::Start { config, log } => node_start(client, config, log).await,
+            NodeCommand::Status => node_status(client).await,
         },
         Command::Join { node_url } => join(client, &node_url).await,
         Command::Peer { command } => match command {
@@ -173,8 +177,7 @@ fn node_init(
 
     if config.exists() && !force {
         return Ok(format!(
-            "node config already exists: {}\nstart node:\n  hivemind-node --config {}\nthen run:\n  hive setup",
-            config.display(),
+            "node config already exists: {}\nstart node:\n  hive node start\nthen run:\n  hive setup",
             config.display()
         ));
     }
@@ -197,16 +200,27 @@ fn node_init(
     )?;
 
     Ok(format!(
-        "wrote node config: {}\nstart node:\n  hivemind-node --config {}\nthen run:\n  hive setup",
-        config.display(),
+        "wrote node config: {}\nstart node:\n  hive node start\nthen run:\n  hive setup",
         config.display()
     ))
 }
 
-fn node_start(config: Option<PathBuf>, log: Option<PathBuf>) -> Result<String, CliError> {
+async fn node_start(
+    client: &reqwest::Client,
+    config: Option<PathBuf>,
+    log: Option<PathBuf>,
+) -> Result<String, CliError> {
     let home = home_dir()?;
     let config = config.unwrap_or_else(|| home.join(".hivemind/node.toml"));
     let log = log.unwrap_or_else(|| home.join(".hivemind/node.log"));
+    if node_running(client).await {
+        return Ok(format!(
+            "hivemind-node already running at {}\nconfig: {}\nlog: {}\nthen run:\n  hive setup",
+            node_url(),
+            config.display(),
+            log.display()
+        ));
+    }
     if let Some(parent) = log.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -222,12 +236,58 @@ fn node_start(config: Option<PathBuf>, log: Option<PathBuf>) -> Result<String, C
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .spawn()?;
+    for _ in 0..20 {
+        if node_running(client).await {
+            return Ok(format!(
+                "started hivemind-node pid {}\nconfig: {}\nlog: {}\nthen run:\n  hive setup",
+                child.id(),
+                config.display(),
+                log.display()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     Ok(format!(
-        "started hivemind-node pid {}\nconfig: {}\nlog: {}\nthen run:\n  hive setup",
+        "started hivemind-node pid {}, but it did not answer health checks yet\nconfig: {}\nlog: {}\ncheck status with:\n  hive node status",
         child.id(),
         config.display(),
         log.display()
     ))
+}
+
+async fn node_status(client: &reqwest::Client) -> Result<String, CliError> {
+    if !node_health(client).await {
+        return Ok(format!(
+            "hivemind-node is not reachable at {}\nstart it with:\n  hive node start",
+            node_url()
+        ));
+    }
+    match node_info(client).await {
+        Ok(node) => Ok(format!(
+            "hivemind-node is running\nlocal control URL: {}\nadvertised node URL: {}\nnode name: {}\nnode id: {}",
+            node_url(),
+            node.node_url,
+            node.name.as_deref().unwrap_or("unknown"),
+            node.node_id
+        )),
+        Err(_) => Ok(format!(
+            "hivemind-node answered health at {}, but /v1/node failed",
+            node_url()
+        )),
+    }
+}
+
+async fn node_health(client: &reqwest::Client) -> bool {
+    client
+        .get(format!("{}/health", node_url()))
+        .send()
+        .await
+        .map(|response| response.status().is_success())
+        .unwrap_or(false)
+}
+
+async fn node_running(client: &reqwest::Client) -> bool {
+    node_health(client).await && node_info(client).await.is_ok()
 }
 
 async fn setup(client: &reqwest::Client) -> Result<String, CliError> {
@@ -235,7 +295,9 @@ async fn setup(client: &reqwest::Client) -> Result<String, CliError> {
     let peers = fetch_peers(client).await?.peers;
     let mut lines = vec![
         "Hive setup".to_owned(),
-        format!("local node: {}", node.node_url),
+        format!("local control URL: {}", node_url()),
+        format!("advertised node URL: {}", node.node_url),
+        format!("node name: {}", node.name.as_deref().unwrap_or("unknown")),
         format!("node id: {}", node.node_id),
         "".to_owned(),
     ];
@@ -248,7 +310,7 @@ async fn setup(client: &reqwest::Client) -> Result<String, CliError> {
         lines.push("Discovered peer candidates:".to_owned());
         for peer in peers {
             let status = if peer.trusted { "trusted" } else { "untrusted" };
-            lines.push(format!("{status}\t{}\t{}", peer.node_url, peer.node_id));
+            lines.push(format_peer_line(&peer, status));
         }
     }
     lines.push("".to_owned());
@@ -265,6 +327,7 @@ async fn join(client: &reqwest::Client, remote_node_url: &str) -> Result<String,
         .json(&PeerInfo {
             node_url: local.node_url,
             node_id: local.node_id,
+            name: local.name,
         })
         .send()
         .await?
@@ -279,6 +342,7 @@ async fn join(client: &reqwest::Client, remote_node_url: &str) -> Result<String,
             .json(&PeerInfo {
                 node_url: peer.node_url,
                 node_id: peer.node_id,
+                name: peer.name,
             })
             .send()
             .await?;
@@ -300,10 +364,7 @@ async fn peers(client: &reqwest::Client) -> Result<String, CliError> {
         .into_iter()
         .map(|peer| {
             let status = if peer.trusted { "trusted" } else { "untrusted" };
-            format!(
-                "{status}\t{}\t{}\t(source: {})",
-                peer.node_url, peer.node_id, peer.source
-            )
+            format_peer_line(&peer, status)
         })
         .collect::<Vec<_>>()
         .join("\n"))
@@ -321,7 +382,12 @@ async fn trust_peer(client: &reqwest::Client, node_id: &str) -> Result<String, C
         return Err(CliError::PeerNotFound);
     }
     let peer = response.error_for_status()?.json::<PeerRecord>().await?;
-    Ok(format!("trusted {} ({})", peer.node_url, peer.node_id))
+    Ok(format!(
+        "trusted {} {} ({})",
+        peer.name.as_deref().unwrap_or("unknown"),
+        peer.node_url,
+        peer.node_id
+    ))
 }
 
 async fn say(client: &reqwest::Client, text: &str, room: &str) -> Result<String, CliError> {
@@ -421,6 +487,18 @@ async fn author_trust(client: &reqwest::Client) -> Result<BTreeMap<String, Strin
         authors.insert(peer.node_id, label.to_owned());
     }
     Ok(authors)
+}
+
+fn format_peer_line(peer: &PeerRecord, status: &str) -> String {
+    format!(
+        "{status}\tname={}\turl={}\tshort={}\tnode_id={}\tsource={}\tlast_seen_ms={}",
+        peer.name.as_deref().unwrap_or("unknown"),
+        peer.node_url,
+        short_id(&peer.node_id),
+        peer.node_id,
+        peer.source,
+        peer.last_seen_ms
+    )
 }
 
 fn format_message(message: &ChatMessage, authors: &BTreeMap<String, String>) -> String {
@@ -550,6 +628,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_node_status() {
+        assert_eq!(
+            Cli::parse_from(["hive", "node", "status"]),
+            Cli {
+                command: Command::Node {
+                    command: NodeCommand::Status
+                }
+            }
+        );
+    }
+
+    #[test]
     fn node_init_writes_config() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("node.toml");
@@ -562,7 +652,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(output.contains("hivemind-node --config"));
+        assert!(output.contains("hive node start"));
         let written = fs::read_to_string(config).unwrap();
         assert!(written.contains(&format!("data_dir = \"{}\"", data_dir.display())));
         assert!(written.contains("bind_addr = \"127.0.0.1:18888\""));

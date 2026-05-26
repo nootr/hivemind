@@ -6,6 +6,7 @@ Install and start one local node:
 curl -fsSL https://raw.githubusercontent.com/nootr/hivemind/main/install.sh | sh
 hive node init
 hive node start
+hive node status
 ```
 
 Use it:

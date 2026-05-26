@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -9,6 +9,7 @@ use hivemind_core::{valid_node_id, ChatMessage, NodeKey, PeerInfo, PeerRecord};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    env,
     fs::{self, OpenOptions},
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket},
@@ -106,6 +107,8 @@ pub struct MessagesQuery {
 pub struct NodeInfoResponse {
     pub node_url: String,
     pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -162,11 +165,15 @@ async fn get_node(State(state): State<AppState>) -> Json<NodeInfoResponse> {
     Json(NodeInfoResponse {
         node_url: state.node_url(),
         node_id: state.key.node_id(),
+        name: local_node_name(),
     })
 }
 
-async fn get_peers(State(state): State<AppState>) -> Result<Json<PeersResponse>, ApiError> {
-    let peers = state
+async fn get_peers(
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+) -> Result<Json<PeersResponse>, ApiError> {
+    let mut peers: Vec<PeerRecord> = state
         .store
         .peers
         .lock()
@@ -174,13 +181,20 @@ async fn get_peers(State(state): State<AppState>) -> Result<Json<PeersResponse>,
         .values()
         .cloned()
         .collect();
+    if !client_addr.ip().is_loopback() {
+        for peer in &mut peers {
+            peer.trusted = false;
+        }
+    }
     Ok(Json(PeersResponse { peers }))
 }
 
 async fn add_peer(
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     Json(peer): Json<PeerInfo>,
 ) -> Result<Json<PeerRecord>, ApiError> {
+    require_local_client(client_addr)?;
     if !valid_node_id(&peer.node_id)
         || !valid_node_url(&peer.node_url)
         || peer.node_id == state.key.node_id()
@@ -221,6 +235,8 @@ async fn join_network(
     peers.push(PeerRecord {
         node_url: state.node_url(),
         node_id: state.key.node_id(),
+        name: local_node_name(),
+        last_seen_ms: now_ms(),
         trusted: false,
         source: "self".to_owned(),
     });
@@ -228,9 +244,11 @@ async fn join_network(
 }
 
 async fn trust_peer(
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     Path(node_id): Path<String>,
 ) -> Result<Json<PeerRecord>, ApiError> {
+    require_local_client(client_addr)?;
     if !valid_node_id(&node_id) {
         return Err(ApiError::InvalidRequest);
     }
@@ -245,9 +263,11 @@ async fn trust_peer(
 }
 
 async fn say(
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     Json(request): Json<SayRequest>,
 ) -> Result<Json<ChatMessage>, ApiError> {
+    require_local_client(client_addr)?;
     let message = state.key.sign_chat(&request.room, now_ms(), &request.text);
     store_message(&state, message.clone())?;
     gossip_message(state, message.clone());
@@ -270,9 +290,11 @@ async fn import_message(
 }
 
 async fn get_messages(
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     Query(query): Query<MessagesQuery>,
 ) -> Result<Json<MessagesResponse>, ApiError> {
+    require_local_client(client_addr)?;
     let after_ms = query.after_ms.unwrap_or(0);
     let messages = state
         .store
@@ -284,6 +306,14 @@ async fn get_messages(
         .cloned()
         .collect();
     Ok(Json(MessagesResponse { messages }))
+}
+
+fn require_local_client(client_addr: SocketAddr) -> Result<(), ApiError> {
+    if client_addr.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
 }
 
 fn store_message(state: &AppState, message: ChatMessage) -> Result<(), ApiError> {
@@ -396,11 +426,18 @@ fn self_peer(
             .map(str::to_owned)
             .unwrap_or_else(|| inferred_node_url(bind_addr, target)),
         node_id: state.key.node_id(),
+        name: local_node_name(),
     }
 }
 
 fn beacon_text(peer: &PeerInfo) -> String {
-    format!("{DISCOVERY_PREFIX}{} {}", peer.node_url, peer.node_id)
+    match peer.name.as_deref().and_then(safe_peer_name) {
+        Some(name) => format!(
+            "{DISCOVERY_PREFIX}{} {} {}",
+            peer.node_url, peer.node_id, name
+        ),
+        None => format!("{DISCOVERY_PREFIX}{} {}", peer.node_url, peer.node_id),
+    }
 }
 
 fn parse_beacon(input: &str) -> Option<PeerInfo> {
@@ -408,21 +445,35 @@ fn parse_beacon(input: &str) -> Option<PeerInfo> {
     let mut parts = rest.split_whitespace();
     let node_url = parts.next()?.trim_end_matches('/').to_owned();
     let node_id = parts.next()?.to_owned();
+    let name = parts.next().and_then(safe_peer_name).map(str::to_owned);
     if valid_node_url(&node_url) && valid_node_id(&node_id) {
-        Some(PeerInfo { node_url, node_id })
+        Some(PeerInfo {
+            node_url,
+            node_id,
+            name,
+        })
     } else {
         None
     }
 }
 
 fn remember_peer(state: &AppState, peer: PeerInfo, source: &str) {
+    let seen_at = now_ms();
     let mut peers = state.store.peers.lock().expect("peer lock");
     peers
         .entry(peer.node_id.clone())
-        .and_modify(|existing| existing.node_url = peer.node_url.clone())
+        .and_modify(|existing| {
+            existing.node_url = peer.node_url.clone();
+            existing.last_seen_ms = seen_at;
+            if peer.name.is_some() {
+                existing.name = peer.name.clone();
+            }
+        })
         .or_insert(PeerRecord {
             node_url: peer.node_url,
             node_id: peer.node_id,
+            name: peer.name,
+            last_seen_ms: seen_at,
             trusted: false,
             source: source.to_owned(),
         });
@@ -455,6 +506,7 @@ async fn fetch_peer_list(state: AppState, peer: PeerInfo) {
                 PeerInfo {
                     node_url: found.node_url,
                     node_id: found.node_id,
+                    name: found.name,
                 },
                 "gossip",
             );
@@ -608,13 +660,40 @@ fn default_lan_ip() -> Option<IpAddr> {
         .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
 }
 
+fn local_node_name() -> Option<String> {
+    env::var("HIVEMIND_NODE_NAME")
+        .ok()
+        .or_else(|| env::var("HOSTNAME").ok())
+        .or_else(|| env::var("COMPUTERNAME").ok())
+        .or_else(|| fs::read_to_string("/etc/hostname").ok())
+        .and_then(|name| safe_peer_name(name.trim()).map(str::to_owned))
+}
+
+fn safe_peer_name(input: &str) -> Option<&str> {
+    let trimmed = input.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 64
+        || !trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'@'))
+    {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 async fn serve(bind_addr: SocketAddr, router: Router) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     eprintln!(
         "hivemind node listening on http://{}",
         listener.local_addr()?
     );
-    axum::serve(listener, router).await
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -622,6 +701,14 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use tower::ServiceExt;
+
+    fn local_addr() -> SocketAddr {
+        "127.0.0.1:50000".parse().unwrap()
+    }
+
+    fn remote_addr() -> SocketAddr {
+        "192.0.2.10:50000".parse().unwrap()
+    }
 
     fn test_state() -> AppState {
         AppState {
@@ -657,6 +744,22 @@ mod tests {
             Some(PeerInfo {
                 node_url: "http://127.0.0.1:1".to_owned(),
                 node_id,
+                name: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_beacon_name() {
+        let node_id = "a".repeat(64);
+        assert_eq!(
+            parse_beacon(&format!(
+                "{DISCOVERY_PREFIX}http://127.0.0.1:1 {node_id} joris-mac"
+            )),
+            Some(PeerInfo {
+                node_url: "http://127.0.0.1:1".to_owned(),
+                node_id,
+                name: Some("joris-mac".to_owned()),
             })
         );
     }
@@ -678,6 +781,7 @@ mod tests {
             PeerInfo {
                 node_url: "http://untrusted".to_owned(),
                 node_id: "b".repeat(64),
+                name: None,
             },
             "test",
         );
@@ -686,6 +790,7 @@ mod tests {
             PeerInfo {
                 node_url: "http://trusted".to_owned(),
                 node_id: "c".repeat(64),
+                name: Some("trusted-host".to_owned()),
             },
             "test",
         );
@@ -710,11 +815,14 @@ mod tests {
             PeerInfo {
                 node_url: "http://peer".to_owned(),
                 node_id: "b".repeat(64),
+                name: Some("peer-host".to_owned()),
             },
             "test",
         );
         let peers = state.store.peers.lock().unwrap();
-        assert!(!peers.values().next().unwrap().trusted);
+        let peer = peers.values().next().unwrap();
+        assert!(!peer.trusted);
+        assert_eq!(peer.name.as_deref(), Some("peer-host"));
     }
 
     #[tokio::test]
@@ -725,6 +833,7 @@ mod tests {
                 axum::http::Request::builder()
                     .method("POST")
                     .uri("/v1/peers")
+                    .extension(ConnectInfo(local_addr()))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(format!(
                         r#"{{"node_url":"http://peer","node_id":"{}"}}"#,
@@ -777,6 +886,7 @@ mod tests {
             PeerInfo {
                 node_url: "http://peer".to_owned(),
                 node_id: "b".repeat(64),
+                name: None,
             },
             "test",
         );
@@ -785,6 +895,7 @@ mod tests {
                 axum::http::Request::builder()
                     .method("POST")
                     .uri(format!("/v1/peers/{}/trust", "b".repeat(64)))
+                    .extension(ConnectInfo(local_addr()))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -834,6 +945,7 @@ mod tests {
             PeerInfo {
                 node_url: "http://peer".to_owned(),
                 node_id: author.node_id(),
+                name: None,
             },
             "test",
         );
@@ -900,6 +1012,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_peer_listing_masks_trust() {
+        let state = test_state();
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://peer".to_owned(),
+                node_id: "b".repeat(64),
+                name: Some("peer-host".to_owned()),
+            },
+            "test",
+        );
+        state
+            .store
+            .peers
+            .lock()
+            .unwrap()
+            .get_mut(&"b".repeat(64))
+            .unwrap()
+            .trusted = true;
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/peers")
+                    .extension(ConnectInfo(remote_addr()))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let peers: PeersResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(peers.peers[0].name.as_deref(), Some("peer-host"));
+        assert!(!peers.peers[0].trusted);
+    }
+
+    #[tokio::test]
+    async fn remote_clients_cannot_post_local_chat() {
+        let state = test_state();
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat")
+                    .extension(ConnectInfo(remote_addr()))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"text":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn remote_clients_cannot_read_local_chat() {
+        let state = test_state();
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/chat")
+                    .extension(ConnectInfo(remote_addr()))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn remote_clients_cannot_trust_peers() {
+        let state = test_state();
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://peer".to_owned(),
+                node_id: "b".repeat(64),
+                name: None,
+            },
+            "test",
+        );
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/peers/{}/trust", "b".repeat(64)))
+                    .extension(ConnectInfo(remote_addr()))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn say_stores_signed_message() {
         let state = test_state();
         let response = app(state)
@@ -907,6 +1118,7 @@ mod tests {
                 axum::http::Request::builder()
                     .method("POST")
                     .uri("/v1/chat")
+                    .extension(ConnectInfo(local_addr()))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"text":"hello"}"#))
                     .unwrap(),

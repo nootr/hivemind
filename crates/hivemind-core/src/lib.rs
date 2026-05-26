@@ -81,12 +81,18 @@ impl NodeKey {
 pub struct PeerInfo {
     pub node_url: String,
     pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct PeerRecord {
     pub node_url: String,
     pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub last_seen_ms: u64,
     pub trusted: bool,
     pub source: String,
 }
