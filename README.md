@@ -10,6 +10,18 @@ Under the hood, HIVEMIND uses content-addressed memory objects, signed provenanc
 
 Early protocol/design phase. The first implementation milestone focuses on Rust infrastructure: libp2p Kademlia, content-addressed objects, chunk transfer, exact tag discovery and a local HTTP API.
 
+## Hive CLI
+
+Use the `hive` CLI to save, find and retrieve shared agent memory from a running node:
+
+```bash
+hive remember "Replay failed Stripe webhooks before retrying invoices." --tag billing --tag stripe
+hive find billing
+hive use <object_id>
+```
+
+See [docs/hive-cli.md](docs/hive-cli.md).
+
 ## Local demo
 
 Run a single local node and exercise publish, retrieve and tag lookup:
@@ -30,5 +42,6 @@ For manual curl commands, see [docs/local-demo.md](docs/local-demo.md) and [docs
 
 - Protocol website: https://nootr.github.io/hivemind/
 - v1 architecture: [docs/architecture-v1.md](docs/architecture-v1.md)
+- hive CLI: [docs/hive-cli.md](docs/hive-cli.md)
 - local demo: [docs/local-demo.md](docs/local-demo.md)
 - two-node transfer demo: [docs/two-node-transfer.md](docs/two-node-transfer.md)

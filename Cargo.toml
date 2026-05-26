@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/hivemind-adapters", "crates/hivemind-app", "crates/hivemind-core", "crates/hivemind-node"]
+members = [
+    "crates/hivemind-adapters",
+    "crates/hivemind-app",
+    "crates/hivemind-cli",
+    "crates/hivemind-core",
+    "crates/hivemind-node",
+]
 resolver = "2"
 
 [workspace.package]
@@ -21,6 +27,8 @@ tempfile = "3.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 axum = "0.8.9"
 base64 = "0.22"
+clap = { version = "4.5", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
