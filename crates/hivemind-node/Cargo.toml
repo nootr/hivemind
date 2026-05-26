@@ -6,23 +6,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-async-trait.workspace = true
 axum.workspace = true
-base64.workspace = true
-getrandom.workspace = true
-hex.workspace = true
-hivemind-adapters = { path = "../hivemind-adapters" }
-hivemind-app = { path = "../hivemind-app" }
+clap.workspace = true
 hivemind-core = { path = "../hivemind-core" }
-minicbor.workspace = true
 reqwest.workspace = true
-rusqlite.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile.workspace = true
 tower.workspace = true

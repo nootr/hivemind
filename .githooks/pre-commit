@@ -10,6 +10,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 echo "==> cargo test --workspace"
 cargo test --workspace
 
+if [[ -f ./install.sh ]]; then
+  echo "==> sh -n ./install.sh"
+  sh -n ./install.sh
+fi
+
 shopt -s nullglob
 for test_script in ./e2e-tests/*.sh; do
   echo "==> ${test_script}"
