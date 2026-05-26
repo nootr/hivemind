@@ -76,17 +76,66 @@
     }
 
     .mark {
+      position: relative;
       width: 38px;
       height: 38px;
       display: grid;
       place-items: center;
+      overflow: hidden;
+      isolation: isolate;
       border: 1px solid var(--border-strong);
       border-radius: 12px;
-      background: linear-gradient(135deg, #ffffff, #e4eeee);
+      background:
+        radial-gradient(circle at 30% 24%, rgba(255,255,255,.95), transparent 34%),
+        linear-gradient(135deg, #ffffff, #e4eeee);
       box-shadow: 0 10px 24px rgba(27, 55, 61, .10);
+      transition: transform .45s cubic-bezier(.2,.8,.2,1), box-shadow .45s cubic-bezier(.2,.8,.2,1), border-color .45s ease;
     }
 
-    .mark svg { width: 22px; height: 22px; }
+    .mark::before,
+    .mark::after {
+      content: "";
+      position: absolute;
+      inset: 9px;
+      border: 1.5px solid rgba(22, 117, 111, .24);
+      border-radius: 999px;
+      transform: rotate(18deg) scaleX(1.28);
+      transition: transform .55s cubic-bezier(.2,.8,.2,1), border-color .45s ease, opacity .45s ease;
+    }
+
+    .mark::after {
+      inset: 13px;
+      border-color: rgba(49, 95, 136, .22);
+      transform: rotate(-36deg) scaleX(1.42);
+      opacity: .82;
+    }
+
+    .mark-node {
+      position: absolute;
+      z-index: 1;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 4px rgba(22, 117, 111, .10);
+      transition: transform .55s cubic-bezier(.2,.8,.2,1), box-shadow .45s ease, background .45s ease;
+    }
+
+    .mark-node:nth-child(1) { transform: translate(-8px, -5px); }
+    .mark-node:nth-child(2) { transform: translate(8px, -2px); background: var(--accent-2); }
+    .mark-node:nth-child(3) { transform: translate(-1px, 8px); background: #46b3a9; }
+
+    .brand:hover .mark {
+      transform: translateY(-1px) rotate(-2deg);
+      border-color: rgba(22, 117, 111, .34);
+      box-shadow: 0 16px 34px rgba(27, 55, 61, .16);
+    }
+
+    .brand:hover .mark::before { transform: rotate(54deg) scaleX(1.36); border-color: rgba(22, 117, 111, .34); }
+    .brand:hover .mark::after { transform: rotate(-78deg) scaleX(1.50); opacity: 1; }
+    .brand:hover .mark-node:nth-child(1) { transform: translate(-10px, 6px); }
+    .brand:hover .mark-node:nth-child(2) { transform: translate(10px, 5px); }
+    .brand:hover .mark-node:nth-child(3) { transform: translate(0, -10px); box-shadow: 0 0 0 6px rgba(70, 179, 169, .12); }
 
     .links {
       display: flex;
@@ -376,7 +425,8 @@
 
     @media (prefers-reduced-motion: reduce) {
       html { scroll-behavior: auto; }
-      .button:hover { transform: none; }
+      .button:hover, .brand:hover .mark { transform: none; }
+      .mark, .mark::before, .mark::after, .mark-node { transition: none; }
     }
   </style>
 </head>
@@ -385,9 +435,9 @@
     <header class="nav" aria-label="Primary navigation">
       <a class="brand" href="#top" aria-label="HIVEMIND home">
         <span class="mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" role="img">
-            <path d="M6 7.5h12M6 12h12M6 16.5h12M8 5.5v13M16 5.5v13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-          </svg>
+          <span class="mark-node"></span>
+          <span class="mark-node"></span>
+          <span class="mark-node"></span>
         </span>
         HIVEMIND
       </a>
