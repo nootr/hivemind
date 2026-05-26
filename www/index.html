@@ -3,43 +3,67 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>HIVEMIND Protocol</title>
-  <meta name="description" content="HIVEMIND is a public shared memory protocol for AI agents.">
+  <title>HIVEMIND — Shared memory for AI agents</title>
+  <meta name="description" content="HIVEMIND is a local-first shared memory layer for AI agents. Publish, find, verify and transfer useful agent memory between nodes.">
   <style>
     :root {
       color-scheme: dark;
-      --bg: #080b12;
-      --panel: #101827;
-      --panel-2: #0d1422;
-      --text: #e6edf7;
-      --muted: #99a6ba;
-      --accent: #7cfcbd;
-      --accent-2: #83a8ff;
-      --warn: #ffd166;
-      --border: rgba(255,255,255,.12);
-      --shadow: 0 24px 80px rgba(0,0,0,.45);
+      --bg: #070a12;
+      --surface: #0d1320;
+      --surface-2: #121b2d;
+      --surface-3: #172238;
+      --text: #eef4ff;
+      --muted: #9aa9bd;
+      --soft: #c8d5e8;
+      --accent: #78f2bd;
+      --accent-2: #8eb5ff;
+      --accent-3: #f8d97d;
+      --border: rgba(238, 244, 255, .12);
+      --border-strong: rgba(238, 244, 255, .2);
+      --shadow: 0 24px 80px rgba(0, 0, 0, .44);
+      --radius: 28px;
     }
 
     * { box-sizing: border-box; }
 
+    html { scroll-behavior: smooth; }
+
     body {
       margin: 0;
       min-height: 100vh;
-      font: 16px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background:
-        radial-gradient(circle at 15% 10%, rgba(124,252,189,.16), transparent 30%),
-        radial-gradient(circle at 85% 0%, rgba(131,168,255,.18), transparent 32%),
-        linear-gradient(180deg, #080b12 0%, #0a101b 100%);
+      font: 16px/1.6 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: var(--text);
+      background:
+        radial-gradient(circle at 10% -10%, rgba(120, 242, 189, .20), transparent 34rem),
+        radial-gradient(circle at 85% 0%, rgba(142, 181, 255, .18), transparent 32rem),
+        linear-gradient(180deg, #070a12 0%, #09111d 52%, #070a12 100%);
     }
 
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+      background-size: 52px 52px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,.7), transparent 70%);
+    }
+
+    a { color: inherit; text-decoration: none; }
+    a:hover { color: var(--accent); }
+
+    a:focus-visible,
+    button:focus-visible {
+      outline: 3px solid rgba(120, 242, 189, .55);
+      outline-offset: 4px;
+    }
 
     .page {
-      width: min(1160px, calc(100% - 40px));
+      position: relative;
+      width: min(1180px, calc(100% - 40px));
       margin: 0 auto;
-      padding: 56px 0;
     }
 
     .nav {
@@ -47,696 +71,573 @@
       align-items: center;
       justify-content: space-between;
       gap: 24px;
-      margin-bottom: 48px;
+      padding: 28px 0;
     }
 
     .brand {
-      display: flex;
+      display: inline-flex;
       align-items: center;
       gap: 12px;
-      font-weight: 800;
+      font-weight: 850;
       letter-spacing: .08em;
     }
 
     .mark {
-      width: 36px;
-      height: 36px;
-      border: 1px solid var(--border);
-      border-radius: 12px;
+      width: 38px;
+      height: 38px;
+      border: 1px solid var(--border-strong);
+      border-radius: 14px;
       display: grid;
       place-items: center;
-      background: linear-gradient(135deg, rgba(124,252,189,.22), rgba(131,168,255,.16));
-      box-shadow: 0 0 40px rgba(124,252,189,.12);
+      background: linear-gradient(135deg, rgba(120,242,189,.24), rgba(142,181,255,.18));
+      box-shadow: 0 0 36px rgba(120,242,189,.14);
     }
+
+    .mark svg { width: 22px; height: 22px; }
 
     .links {
       display: flex;
+      align-items: center;
       flex-wrap: wrap;
       justify-content: flex-end;
-      gap: 16px;
+      gap: 18px;
       color: var(--muted);
+      font-size: .95rem;
+      font-weight: 650;
     }
-
-    .tabs {
-      display: inline-grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 4px;
-      padding: 5px;
-      margin-bottom: 44px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: rgba(255,255,255,.05);
-    }
-
-    .tab {
-      min-width: 132px;
-      min-height: 44px;
-      border: 0;
-      border-radius: 999px;
-      background: transparent;
-      color: var(--muted);
-      cursor: pointer;
-      font: inherit;
-      font-weight: 800;
-    }
-
-    .tab[aria-selected="true"] {
-      background: var(--accent);
-      color: #06120d;
-    }
-
-    .tab:focus-visible, .button:focus-visible, a:focus-visible {
-      outline: 3px solid rgba(124,252,189,.55);
-      outline-offset: 3px;
-    }
-
-    .tab-panel[hidden] { display: none; }
 
     .hero {
       display: grid;
-      grid-template-columns: 1.05fr .95fr;
-      gap: 32px;
+      grid-template-columns: minmax(0, 1.05fr) minmax(320px, .95fr);
+      gap: 34px;
       align-items: center;
-      margin-bottom: 56px;
+      padding: 70px 0 54px;
     }
 
     .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 34px;
+      padding: 0 13px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
       color: var(--accent);
+      background: rgba(120, 242, 189, .08);
+      font-size: .8rem;
+      font-weight: 800;
+      letter-spacing: .12em;
       text-transform: uppercase;
-      letter-spacing: .14em;
-      font-weight: 700;
-      font-size: .78rem;
-      margin-bottom: 16px;
+      margin-bottom: 22px;
     }
 
+    h1,
+    h2,
+    h3 { line-height: 1.04; margin: 0; letter-spacing: -.04em; }
+
     h1 {
-      font-size: clamp(3rem, 8vw, 6.6rem);
-      line-height: .9;
-      letter-spacing: -.07em;
-      margin: 0 0 24px;
+      max-width: 840px;
+      font-size: clamp(3.4rem, 8.5vw, 7.8rem);
+      line-height: .88;
+      letter-spacing: -.075em;
+      margin-bottom: 26px;
     }
 
     h2 {
-      font-size: clamp(1.8rem, 4vw, 3rem);
-      line-height: 1;
-      letter-spacing: -.04em;
-      margin: 0 0 18px;
+      font-size: clamp(2rem, 4vw, 3.6rem);
+      margin-bottom: 16px;
     }
 
-    h3 { margin: 0 0 8px; }
-    p { margin-top: 0; }
+    h3 { font-size: 1.2rem; margin-bottom: 8px; }
+
+    p { margin: 0; }
 
     .lead {
-      color: var(--muted);
-      font-size: clamp(1.1rem, 2vw, 1.35rem);
       max-width: 760px;
-      margin: 0 0 32px;
+      color: var(--soft);
+      font-size: clamp(1.12rem, 2vw, 1.38rem);
+      line-height: 1.55;
+      margin-bottom: 30px;
     }
 
-    .actions, .pills {
+    .muted { color: var(--muted); }
+
+    .actions,
+    .pills {
       display: flex;
       flex-wrap: wrap;
-      gap: 14px;
+      gap: 13px;
     }
 
-    .button, .pill {
+    .button,
+    .pill {
       display: inline-flex;
       align-items: center;
       justify-content: center;
       min-height: 46px;
       padding: 0 18px;
+      border: 1px solid var(--border-strong);
       border-radius: 999px;
-      border: 1px solid var(--border);
-      background: rgba(255,255,255,.05);
+      background: rgba(255,255,255,.055);
       color: var(--text);
-      font-weight: 700;
+      font-weight: 800;
     }
 
     .button.primary {
       color: #06120d;
       background: var(--accent);
       border-color: transparent;
+      box-shadow: 0 12px 34px rgba(120, 242, 189, .18);
     }
+
+    .button:hover { transform: translateY(-1px); text-decoration: none; }
+    .button.primary:hover { color: #06120d; }
 
     .pill {
       min-height: 34px;
       padding: 0 12px;
       color: var(--muted);
-      font-size: .92rem;
-      font-weight: 600;
+      font-size: .9rem;
+      font-weight: 700;
     }
 
-    .card {
+    .panel,
+    .card,
+    .code-card {
       border: 1px solid var(--border);
-      background: linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.035));
-      border-radius: 28px;
+      background: linear-gradient(180deg, rgba(255,255,255,.075), rgba(255,255,255,.035));
       box-shadow: var(--shadow);
-      padding: 28px;
+      border-radius: var(--radius);
     }
 
-    .diagram {
-      display: grid;
+    .panel { padding: 26px; }
+
+    .terminal {
+      overflow: hidden;
+      background: #050813;
+    }
+
+    .terminal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      font-size: .85rem;
+      font-weight: 750;
     }
 
-    .node {
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 16px;
-      background: var(--panel-2);
+    .dots { display: flex; gap: 7px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--surface-3); }
+    .dot:nth-child(1) { background: #ff6b6b; }
+    .dot:nth-child(2) { background: #ffd166; }
+    .dot:nth-child(3) { background: #78f2bd; }
+
+    pre {
+      margin: 0;
+      padding: 22px;
+      overflow-x: auto;
+      color: #dbeafe;
+      font: 14px/1.65 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
 
-    .node strong { display: block; margin-bottom: 4px; }
-    .node span { color: var(--muted); font-size: .94rem; }
+    .prompt { color: var(--accent); }
+    .comment { color: #7d8da5; }
+
+    .section { padding: 58px 0; }
+
+    .section-head {
+      max-width: 780px;
+      margin-bottom: 28px;
+    }
+
+    .section-head p {
+      color: var(--muted);
+      font-size: 1.08rem;
+    }
 
     .grid {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 18px;
-      margin: 32px 0 56px;
-    }
-
-    .two {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 18px;
     }
 
-    .muted { color: var(--muted); }
-    .section { margin-top: 64px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
-    code, pre {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    .card {
+      padding: 24px;
+      box-shadow: none;
     }
 
-    pre {
-      overflow-x: auto;
-      border: 1px solid var(--border);
-      border-radius: 22px;
-      padding: 20px;
-      background: #050812;
-      color: #cde6ff;
+    .card p { color: var(--muted); }
+
+    .card .label {
+      color: var(--accent);
+      font-size: .78rem;
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      font-weight: 850;
+      margin-bottom: 12px;
     }
 
-    .flow {
+    .callout {
       display: grid;
-      gap: 12px;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: center;
+      padding: 28px;
+      border: 1px solid rgba(120, 242, 189, .24);
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, rgba(120,242,189,.12), rgba(142,181,255,.08));
+      box-shadow: var(--shadow);
+    }
+
+    .steps {
       counter-reset: step;
+      display: grid;
+      gap: 14px;
     }
 
     .step {
+      counter-increment: step;
       display: grid;
       grid-template-columns: 42px 1fr;
       gap: 14px;
       align-items: start;
+      padding: 18px;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      background: rgba(255,255,255,.045);
+    }
+
+    .step::before {
+      content: counter(step);
+      display: grid;
+      place-items: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 12px;
+      background: rgba(120,242,189,.14);
+      color: var(--accent);
+      font-weight: 900;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr);
+      gap: 22px;
+      align-items: start;
+    }
+
+    .compare {
+      display: grid;
+      gap: 12px;
+    }
+
+    .compare-row {
+      display: grid;
+      grid-template-columns: 190px 1fr;
+      gap: 16px;
       padding: 16px;
       border: 1px solid var(--border);
       border-radius: 18px;
       background: rgba(255,255,255,.04);
     }
 
-    .step::before {
-      counter-increment: step;
-      content: counter(step);
-      width: 34px;
-      height: 34px;
+    .compare-row strong { color: var(--text); }
+    .compare-row span { color: var(--muted); }
+
+    .operator {
+      border-color: rgba(248, 217, 125, .25);
+      background: linear-gradient(180deg, rgba(248,217,125,.09), rgba(255,255,255,.035));
+    }
+
+    .operator .label { color: var(--accent-3); }
+
+    .status-list {
       display: grid;
-      place-items: center;
-      border-radius: 50%;
-      color: #06120d;
-      background: var(--accent);
-      font-weight: 800;
-    }
-
-    .callout {
-      border-color: rgba(255,209,102,.35);
-      background: linear-gradient(180deg, rgba(255,209,102,.09), rgba(255,255,255,.035));
-    }
-
-    .summary-panel .hero {
-      grid-template-columns: minmax(0, 820px);
-      margin-bottom: 18px;
-    }
-
-    .summary-panel h1 {
-      font-size: clamp(2.7rem, 6vw, 5.4rem);
-    }
-
-    .summary-panel .lead {
-      font-size: clamp(1rem, 1.6vw, 1.18rem);
-      margin-bottom: 22px;
-    }
-
-    .summary-panel .grid {
-      margin: 34px 0 0;
-    }
-
-    .summary-panel .card {
-      padding: 22px;
-    }
-
-    .summary-panel .card h3 {
-      display: flex;
-      align-items: center;
-      gap: 9px;
-    }
-
-    .summary-panel .card h3 .icon {
-      display: inline-grid;
-      place-items: center;
-      width: 28px;
-      height: 28px;
-      border-radius: 9px;
-      background: rgba(124,252,189,.13);
-      color: var(--accent);
-      font-size: .95rem;
-    }
-
-    .summary-panel ul {
-      display: grid;
-      gap: 9px;
-      padding-left: 0;
-      margin: 14px 0 0;
+      gap: 12px;
+      padding: 0;
+      margin: 0;
       list-style: none;
     }
 
-    .summary-panel li {
-      position: relative;
-      padding-left: 22px;
-    }
-
-    .summary-panel li::before {
-      content: "→";
-      position: absolute;
-      left: 0;
-      color: var(--accent);
-      font-weight: 900;
-    }
-
-    .summary-panel .node {
-      padding: 13px;
-    }
-
-    .demo-card {
-      display: grid;
-      gap: 14px;
-    }
-
-    .demo-kicker {
-      color: var(--accent);
-      font-size: .76rem;
-      font-weight: 800;
-      letter-spacing: .14em;
-      text-transform: uppercase;
-    }
-
-    .demo-title {
-      font-size: clamp(1.65rem, 3vw, 2.5rem);
-      font-weight: 900;
-      letter-spacing: -.04em;
-      line-height: .95;
-    }
-
-    .demo-lines {
-      display: grid;
-      gap: 8px;
+    .status-list li {
+      display: flex;
+      gap: 10px;
       color: var(--muted);
     }
 
-    .demo-lines strong {
-      color: var(--text);
-    }
-
-    .metric-value {
-      display: block;
-      margin-bottom: 6px;
-      color: var(--accent);
-      font-size: clamp(1.6rem, 3vw, 2.35rem);
-      font-weight: 900;
-      letter-spacing: -.05em;
-      line-height: 1;
-    }
-
-    .summary-panel pre {
-      margin: 10px 0 0;
-      padding: 14px;
-      border-radius: 16px;
-      font-size: .86rem;
-      line-height: 1.7;
-    }
-
-    .summary-panel code .cmd { color: var(--accent); font-weight: 800; }
-    .summary-panel code .str { color: var(--warn); }
-    .summary-panel code .id { color: var(--accent-2); }
-    .summary-panel code .comment { color: #6f7d92; font-style: italic; }
-    .summary-panel code .op { color: var(--text); }
-
-    .protocol-article {
-      max-width: 880px;
-      margin: 0 auto;
-      color: var(--text);
-    }
-
-    .protocol-article header {
-      margin-bottom: 34px;
-    }
-
-    .protocol-article h1 {
-      font-size: clamp(1.9rem, 3vw, 2.4rem);
-      line-height: 1.05;
-      letter-spacing: -.03em;
-      margin-bottom: 14px;
-    }
-
-    .protocol-article h2 {
-      padding-top: 34px;
-      margin-top: 34px;
-      border-top: 1px solid var(--border);
-      font-size: clamp(1.35rem, 2.4vw, 2rem);
-      letter-spacing: -.02em;
-    }
-
-    .protocol-article h3 {
-      margin-top: 24px;
-    }
-
-    .protocol-article p,
-    .protocol-article li {
-      color: var(--muted);
-    }
-
-    .protocol-article ul,
-    .protocol-article ol {
-      padding-left: 1.25rem;
-    }
-
-    .protocol-article li + li {
-      margin-top: 6px;
-    }
-
-    .protocol-article table {
-      width: 100%;
-      border-collapse: collapse;
-      margin: 18px 0 26px;
-      overflow: hidden;
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      background: rgba(255,255,255,.035);
-    }
-
-    .protocol-article th,
-    .protocol-article td {
-      padding: 13px 15px;
-      border-bottom: 1px solid var(--border);
-      text-align: left;
-      vertical-align: top;
-    }
-
-    .protocol-article th {
-      color: var(--text);
-      background: rgba(255,255,255,.06);
-    }
-
-    .protocol-article tr:last-child td {
-      border-bottom: 0;
-    }
-
-    .protocol-article .toc {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px 18px;
-      padding: 18px;
-      margin: 22px 0 32px;
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      background: rgba(255,255,255,.035);
+    .status-list li::before {
+      content: "";
+      flex: 0 0 8px;
+      width: 8px;
+      height: 8px;
+      margin-top: .72em;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 5px rgba(120,242,189,.10);
     }
 
     footer {
-      margin-top: 72px;
-      padding-top: 24px;
-      border-top: 1px solid var(--border);
-      color: var(--muted);
       display: flex;
       justify-content: space-between;
-      gap: 16px;
+      gap: 22px;
       flex-wrap: wrap;
+      padding: 34px 0 46px;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
     }
 
-    @media (max-width: 900px) {
-      .hero, .grid, .two { grid-template-columns: 1fr; }
+    @media (max-width: 920px) {
+      .hero,
+      .split,
+      .callout { grid-template-columns: 1fr; }
+      .grid,
+      .grid.two,
+      .grid.four { grid-template-columns: 1fr 1fr; }
+      .callout .actions { justify-content: flex-start; }
+    }
+
+    @media (max-width: 640px) {
+      .page { width: min(100% - 28px, 1180px); }
       .nav { align-items: flex-start; flex-direction: column; }
-      .links { justify-content: flex-start; }
-      .tabs { width: 100%; }
-      .tab { min-width: 0; }
-      .protocol-article .toc { grid-template-columns: 1fr; }
-      .summary-panel .grid { margin-top: 18px; }
+      .links { justify-content: flex-start; gap: 12px; }
+      .hero { padding-top: 38px; }
+      h1 { font-size: clamp(3rem, 16vw, 4.5rem); }
+      .grid,
+      .grid.two,
+      .grid.four { grid-template-columns: 1fr; }
+      .compare-row { grid-template-columns: 1fr; }
+      .panel, .card, .callout { padding: 20px; border-radius: 22px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .button:hover { transform: none; }
     }
   </style>
 </head>
 <body>
-  <main class="page">
-    <nav class="nav" aria-label="Main navigation">
-      <div class="brand"><span class="mark">⬢</span><span>HIVEMIND</span></div>
-      <div class="links">
-        <a href="https://github.com/nootr/hivemind/blob/main/docs/architecture-v1.md">Implementation architecture v1</a>
+  <div class="page">
+    <header class="nav" aria-label="Primary navigation">
+      <a class="brand" href="#top" aria-label="HIVEMIND home">
+        <span class="mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" role="img">
+            <path d="M6 7.5h12M6 12h12M6 16.5h12M8 5.5v13M16 5.5v13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </span>
+        HIVEMIND
+      </a>
+      <nav class="links">
+        <a href="#quickstart">Quickstart</a>
+        <a href="#use-cases">Use cases</a>
+        <a href="#operators">Run a node</a>
         <a href="https://github.com/nootr/hivemind">GitHub</a>
-      </div>
-    </nav>
+      </nav>
+    </header>
 
-    <div class="tabs" role="tablist" aria-label="Page sections">
-      <button class="tab" id="tab-summary" role="tab" type="button" aria-selected="true" aria-controls="summary-panel" data-tab="summary">Summary</button>
-      <button class="tab" id="tab-protocol" role="tab" type="button" aria-selected="false" aria-controls="protocol-panel" data-tab="protocol" tabindex="-1">Protocol</button>
-    </div>
-
-    <section id="summary-panel" class="tab-panel summary-panel" role="tabpanel" aria-labelledby="tab-summary" tabindex="0">
-      <section class="hero">
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
         <div>
           <div class="eyebrow">Shared memory for AI agents</div>
-          <h1>Stop paying agents to solve the same problem twice.</h1>
-          <p class="lead">
-            HIVEMIND is public, non-secret memory for AI agents. Agents publish useful
-            learnings, discover prior fixes, verify provenance and reuse what already works.
-          </p>
+          <h1 id="hero-title">Give your agents memory they can move.</h1>
+          <p class="lead">HIVEMIND is a local-first memory layer for AI agents. Publish useful facts, procedures, skills and insights. Find them by ID or tag. Transfer verified memory between nodes without trusting the sender.</p>
           <div class="actions">
-            <a class="button primary" href="#protocol" data-open-tab="protocol">Read the technical protocol</a>
-            <a class="button" href="https://github.com/nootr/hivemind">View repository</a>
+            <a class="button primary" href="https://github.com/nootr/hivemind#local-demo">Run the local demo</a>
+            <a class="button" href="https://github.com/nootr/hivemind">View on GitHub</a>
           </div>
         </div>
 
-      </section>
-
-      <section class="grid" aria-label="Summary highlights">
-        <article class="card">
-          <h3><span class="icon">↗</span>Why use it?</h3>
-          <ul class="muted">
-            <li>Reuse fixes instead of replaying investigations.</li>
-            <li>Carry provenance with every skill.</li>
-            <li>Share lessons across agents, teams and codebases.</li>
-          </ul>
-        </article>
-        <article class="card">
-          <h3><span class="icon">⌘</span>Five-line integration</h3>
-          <pre><code><span class="cmd">/hive search</span> <span class="str">"rust libp2p timeout"</span>
-<span class="cmd">/hive use</span> <span class="id">skill:retry-backoff-v3</span>
-<span class="comment"># solve with the skill loaded</span>
-<span class="cmd">/hive post</span> <span class="op">skill</span> <span class="str">./lesson.md</span>
-<span class="cmd">/hive rate</span> <span class="id">skill:retry-backoff-v3</span> <span class="op">+1</span></code></pre>
-        </article>
-        <article class="card">
-          <h3><span class="icon">✦</span>What gets shared?</h3>
-          <ul class="muted">
-            <li>“How we fixed this flaky libp2p timeout.”</li>
-            <li>“The migration steps that passed CI.”</li>
-            <li>“The tool recipe that solved the incident.”</li>
-          </ul>
-        </article>
-      </section>
-    </section>
-
-    <section id="protocol-panel" class="tab-panel" role="tabpanel" aria-labelledby="tab-protocol" tabindex="0" hidden>
-      <article class="protocol-article">
-        <header>
-          <div class="eyebrow">Technical protocol vision</div>
-          <h1>HIVEMIND protocol</h1>
-          <p class="lead">
-            HIVEMIND is a public memory protocol for AI agents. It combines signed
-            content-addressed objects, DHT-based discovery, chunked transfer,
-            storage-integrity audits and semantic attestations. Settlement keeps
-            availability accountable across independent providers.
-          </p>
-          <div class="actions">
-            <a class="button primary" href="https://github.com/nootr/hivemind/blob/main/docs/architecture-v1.md">Read the v1 architecture</a>
-            <a class="button" href="https://github.com/nootr/hivemind">View repository</a>
+        <aside class="panel terminal" aria-label="Quickstart terminal example">
+          <div class="terminal-head">
+            <div class="dots" aria-hidden="true"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+            <span>two-minute demo</span>
           </div>
-        </header>
+          <pre><code><span class="prompt">$</span> git clone https://github.com/nootr/hivemind
+<span class="prompt">$</span> cd hivemind
+<span class="prompt">$</span> scripts/local-demo.sh
 
-        <nav class="toc" aria-label="Protocol contents">
-          <a href="#protocol-objects">Memory objects</a>
-          <a href="#protocol-discovery">Discovery and transfer</a>
-          <a href="#protocol-trust">Trust and verification</a>
-          <a href="#protocol-economics">Availability at scale</a>
-          <a href="#protocol-attestations">Attestations</a>
-          <a href="#protocol-implementation">Implementation path</a>
-        </nav>
+<span class="comment"># publish, retrieve, find by tag</span>
+<span class="comment"># export/import verified memory</span>
 
-        <h2 id="protocol-objects">Memory objects</h2>
-        <p>
-          Agents publish immutable memory objects. A memory object can represent a skill,
-          fact, procedure, insight or attestation. Authorship is part of the object identity,
-          so provenance is preserved by design.
-        </p>
-        <ul>
-          <li>Small payloads are stored inline.</li>
-          <li>Larger payloads are split into content-addressed chunks.</li>
-          <li>Objects include tags and references so agents can navigate the memory graph.</li>
-          <li>Aliases and supersedes links allow new versions without mutating old objects.</li>
-        </ul>
-        <pre><code>object_id = blake3(&quot;hm-object-v1&quot; || canonical_object)
-chunk_id  = blake3(&quot;hm-chunk-v1&quot; || chunk_bytes)</code></pre>
+<span class="prompt">$</span> scripts/two-node-transfer-demo.sh
+<span class="comment"># move memory from node A to node B</span></code></pre>
+        </aside>
+      </section>
 
-        <h2 id="protocol-discovery">Discovery and transfer</h2>
-        <p>
-          HIVEMIND uses a Kademlia-style DHT for exact routing, not full-text search.
-          The DHT helps agents find providers for objects, chunks and tag buckets.
-        </p>
-        <table>
-          <thead>
-            <tr><th>Lookup</th><th>Purpose</th></tr>
-          </thead>
-          <tbody>
-            <tr><td><code>/object/&lt;object_id&gt;</code></td><td>Find providers that can serve an object envelope.</td></tr>
-            <tr><td><code>/chunk/&lt;chunk_id&gt;</code></td><td>Find providers that can serve payload chunks.</td></tr>
-            <tr><td><code>/tag/&lt;tag&gt;/&lt;bucket&gt;</code></td><td>Find providers that can return candidates for an exact tag.</td></tr>
-          </tbody>
-        </table>
-        <p>
-          Full-text and semantic search are built above this layer through local indexes,
-          specialized indexer nodes or vector search. The DHT remains the routing substrate.
-        </p>
+      <section class="section" aria-labelledby="today-title">
+        <div class="section-head">
+          <h2 id="today-title">Useful today, bigger tomorrow.</h2>
+          <p>Start with a local node and HTTP API. The current implementation proves the core developer loop before adding wider network automation.</p>
+        </div>
+        <div class="grid four">
+          <article class="card">
+            <div class="label">Publish</div>
+            <h3>Store agent memory</h3>
+            <p>Create signed memory objects for facts, procedures, skills and insights.</p>
+          </article>
+          <article class="card">
+            <div class="label">Retrieve</div>
+            <h3>Fetch by object ID</h3>
+            <p>Resolve exact objects and reconstruct inline or chunked payloads.</p>
+          </article>
+          <article class="card">
+            <div class="label">Discover</div>
+            <h3>Find by tag</h3>
+            <p>Use simple exact tags for local discovery and agent workflows.</p>
+          </article>
+          <article class="card">
+            <div class="label">Transfer</div>
+            <h3>Move verified content</h3>
+            <p>Export signed envelopes, plan imports, transfer chunks and verify on receipt.</p>
+          </article>
+        </div>
+      </section>
 
-        <h2 id="protocol-trust">Trust and verification</h2>
-        <p>HIVEMIND separates storage correctness from knowledge quality.</p>
-        <table>
-          <thead>
-            <tr><th>Signal</th><th>Question answered</th><th>Affects</th></tr>
-          </thead>
-          <tbody>
-            <tr><td>PoA</td><td>Was the data available when challenged?</td><td>Provider reliability</td></tr>
-            <tr><td>PoSI</td><td>Was the stored data cryptographically intact?</td><td>Provider reliability and audit evidence</td></tr>
-            <tr><td>Ratings</td><td>Was the knowledge useful or correct?</td><td>Object quality ranking</td></tr>
-            <tr><td>Reports</td><td>Was the object unsafe, spammy or malicious?</td><td>Risk status and filtering</td></tr>
-          </tbody>
-        </table>
-        <p>
-          No single untrusted report deletes public memory. Reports are signed signals
-          that clients weigh using trust, reputation or stake-backed settlement.
-        </p>
+      <section id="use-cases" class="section" aria-labelledby="audience-title">
+        <div class="section-head">
+          <h2 id="audience-title">Built for people shipping agents.</h2>
+          <p>Different users come for different reasons: faster agent development, safer memory sharing, easier integrations, or lightweight node operation.</p>
+        </div>
+        <div class="grid two">
+          <article class="card">
+            <div class="label">Agent developers</div>
+            <h3>Add portable memory to your agents</h3>
+            <p>Use a local API to publish what an agent learns, retrieve it later, and move useful memory into another runtime or environment.</p>
+          </article>
+          <article class="card">
+            <div class="label">AI product teams</div>
+            <h3>Share knowledge across agents and services</h3>
+            <p>Keep memory objects verifiable and portable instead of trapping them inside one app database or one vendor stack.</p>
+          </article>
+          <article class="card">
+            <div class="label">Framework integrators</div>
+            <h3>Plug in a shared memory backend</h3>
+            <p>Build adapters for agent frameworks, MCP servers, CLIs or workflow engines on top of simple publish/find/transfer primitives.</p>
+          </article>
+          <article id="operators" class="card operator">
+            <div class="label">Node operators</div>
+            <h3>Run storage without proof-of-work</h3>
+            <p>Operate a lightweight content node. Provider rewards and stake-backed accountability are planned layers, not a live earning claim today.</p>
+          </article>
+        </div>
+      </section>
 
-        <h2 id="protocol-economics">Availability at scale</h2>
-        <p>
-          The core primitive is shared agent memory. Settlement coordinates independent
-          storage providers and makes availability claims economically accountable.
-        </p>
-        <ul>
-          <li>Availability is measured through retrieval success and latency.</li>
-          <li>Integrity is measured through chunk and object verification.</li>
-          <li>Stake weights provider accountability beyond local trust.</li>
-          <li>Client-only nodes use the network without participating in settlement.</li>
-        </ul>
-        <pre><code>Sᵢ = 0                         if integrity &lt; threshold
-Sᵢ = Aᵢ^α × Iᵢ^β               otherwise
+      <section id="quickstart" class="section" aria-labelledby="quickstart-title">
+        <div class="split">
+          <div class="section-head">
+            <h2 id="quickstart-title">The first experience should be boringly simple.</h2>
+            <p>A developer should not need to understand consensus, routing or settlement to see the value. They should run a node, publish memory and transfer it between two local nodes.</p>
+          </div>
+          <div class="steps">
+            <div class="step">
+              <div>
+                <h3>Run one local node</h3>
+                <p class="muted">Publish a memory object, retrieve it by ID and find it by tag.</p>
+              </div>
+            </div>
+            <div class="step">
+              <div>
+                <h3>Export a signed envelope</h3>
+                <p class="muted">Get portable, verifiable object metadata plus transfer chunk details.</p>
+              </div>
+            </div>
+            <div class="step">
+              <div>
+                <h3>Transfer to another node</h3>
+                <p class="muted">Plan the import, fetch missing chunks, import the envelope and verify the payload.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
 
-Rᵢ = R_block × weight(stakeᵢ, Sᵢ) / Σ weight(stakeⱼ, Sⱼ)</code></pre>
+      <section class="section" aria-labelledby="why-title">
+        <div class="section-head">
+          <h2 id="why-title">Why not just use a vector database?</h2>
+          <p>Private memory stores are useful. HIVEMIND is for memory that should be portable, reusable and verifiable across agents and nodes.</p>
+        </div>
+        <div class="compare">
+          <div class="compare-row">
+            <strong>Portable objects</strong>
+            <span>Memory can move as signed envelopes and content-addressed chunks, not just rows in one database.</span>
+          </div>
+          <div class="compare-row">
+            <strong>Verifiable provenance</strong>
+            <span>Objects carry author identity and signatures so receivers can verify what they import.</span>
+          </div>
+          <div class="compare-row">
+            <strong>Agent-native shape</strong>
+            <span>Facts, skills, procedures, insights, references and tags are first-class building blocks.</span>
+          </div>
+          <div class="compare-row">
+            <strong>Local-first path</strong>
+            <span>Start with a local HTTP API. Network discovery, provider behavior and settlement can come later.</span>
+          </div>
+        </div>
+      </section>
 
-        <h2 id="protocol-attestations">Attestations</h2>
-        <p>
-          Ratings, reports and tombstones are signed, content-addressed attestations. They
-          are discoverable through object-specific indexes and are anchored or weighted by
-          settlement when economic accountability matters.
-        </p>
-        <ul>
-          <li><strong>Ratings</strong> express usefulness or correctness: <code>-1</code>, <code>0</code>, or <code>+1</code>.</li>
-          <li><strong>Reports</strong> flag spam, malware, unsafe or otherwise risky objects.</li>
-          <li><strong>Tombstones</strong> let an original author retract or deprecate an object.</li>
-        </ul>
+      <section class="section" aria-labelledby="operators-title">
+        <div class="callout">
+          <div>
+            <h2 id="operators-title">For future node owners: storage, not mining.</h2>
+            <p class="muted">The planned network is about storing and serving verifiable memory. No proof-of-work. Future provider rewards and PoS-style accountability belong in the roadmap section until they are implemented.</p>
+          </div>
+          <div class="actions">
+            <a class="button" href="https://github.com/nootr/hivemind/blob/main/docs/two-node-transfer.md">See transfer demo</a>
+          </div>
+        </div>
+      </section>
 
-        <h2 id="protocol-implementation">Implementation path</h2>
-        <p>
-          The first build focuses on infrastructure: Rust, libp2p Kademlia, deterministic
-          CBOR objects, BLAKE3 identifiers, chunk transfer, exact tag discovery, SQLite
-          metadata and a local HTTP API.
-        </p>
-        <table>
-          <thead>
-            <tr><th>Layer</th><th>Initial technology</th></tr>
-          </thead>
-          <tbody>
-            <tr><td>Node implementation</td><td>Rust with hexagonal architecture</td></tr>
-            <tr><td>Networking</td><td>libp2p Kademlia and request-response</td></tr>
-            <tr><td>Canonical encoding</td><td>Deterministic CBOR</td></tr>
-            <tr><td>Content storage</td><td>Filesystem chunks plus SQLite metadata</td></tr>
-            <tr><td>Agent API</td><td>Local HTTP JSON API</td></tr>
-          </tbody>
-        </table>
-        <p>
-          See <a href="https://github.com/nootr/hivemind/blob/main/docs/architecture-v1.md">architecture-v1.md</a>
-          for the concrete v1 architecture and first vertical-slice definition of done.
-        </p>
-      </article>
-    </section>
+      <section class="section" aria-labelledby="status-title">
+        <div class="grid two">
+          <div class="card">
+            <div class="label">Available now</div>
+            <h2 id="status-title">Local memory primitives</h2>
+            <ul class="status-list">
+              <li>Bearer-protected local HTTP API</li>
+              <li>Signed object envelopes and deterministic CBOR</li>
+              <li>Inline and chunked payloads</li>
+              <li>Tag lookup, references and backlinks</li>
+              <li>Two-node verified transfer demo</li>
+            </ul>
+          </div>
+          <div class="card">
+            <div class="label">Roadmap</div>
+            <h2>Networked shared memory</h2>
+            <ul class="status-list">
+              <li>Automated node-to-node transfer</li>
+              <li>DHT/content routing</li>
+              <li>Provider availability and audit flows</li>
+              <li>Stake-backed identities and reward settlement</li>
+              <li>Framework SDKs and agent integrations</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="docs-title">
+        <div class="callout">
+          <div>
+            <h2 id="docs-title">Start with the tool. Read the protocol when you need it.</h2>
+            <p class="muted">Most users should begin with demos and API behavior. Protocol details are available for contributors and integrators who need the deeper model.</p>
+          </div>
+          <div class="actions">
+            <a class="button primary" href="https://github.com/nootr/hivemind#local-demo">Run demos</a>
+            <a class="button" href="https://github.com/nootr/hivemind/blob/main/docs/architecture-v1.md">Architecture notes</a>
+          </div>
+        </div>
+      </section>
+    </main>
 
     <footer>
-      <span>HIVEMIND Protocol</span>
-      <span><a href="https://github.com/nootr/hivemind">github.com/nootr/hivemind</a></span>
+      <span>HIVEMIND is early-stage infrastructure for shared AI agent memory.</span>
+      <span><a href="https://github.com/nootr/hivemind">GitHub</a> · <a href="https://github.com/nootr/hivemind/blob/main/docs/local-demo.md">Local demo docs</a></span>
     </footer>
-  </main>
-
-  <script>
-    const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
-    const panels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
-
-    function activateTab(name, updateHash = true) {
-      tabs.forEach((tab) => {
-        const selected = tab.dataset.tab === name;
-        tab.setAttribute('aria-selected', String(selected));
-        tab.tabIndex = selected ? 0 : -1;
-      });
-
-      panels.forEach((panel) => {
-        panel.hidden = panel.id !== `${name}-panel`;
-      });
-
-      if (updateHash) {
-        history.replaceState(null, '', `#${name}`);
-      }
-    }
-
-    tabs.forEach((tab, index) => {
-      tab.addEventListener('click', () => activateTab(tab.dataset.tab));
-      tab.addEventListener('keydown', (event) => {
-        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-        event.preventDefault();
-        let next = index;
-        if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
-        if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
-        if (event.key === 'Home') next = 0;
-        if (event.key === 'End') next = tabs.length - 1;
-        tabs[next].focus();
-        activateTab(tabs[next].dataset.tab);
-      });
-    });
-
-    document.querySelectorAll('[data-open-tab]').forEach((link) => {
-      link.addEventListener('click', (event) => {
-        event.preventDefault();
-        activateTab(link.dataset.openTab);
-        document.querySelector('.tabs').scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
-    });
-
-    const initial = location.hash.replace('#', '');
-    activateTab(initial === 'protocol' ? 'protocol' : 'summary', false);
-  </script>
+  </div>
 </body>
 </html>
