@@ -10,6 +10,7 @@ use std::{
 };
 
 const DEFAULT_NODE_URL: &str = "http://127.0.0.1:7747";
+const DEFAULT_REPO_URL: &str = "https://github.com/nootr/hivemind";
 
 #[derive(Debug, Parser, Eq, PartialEq)]
 #[command(name = "hive")]
@@ -22,6 +23,16 @@ pub struct Cli {
 pub enum Command {
     Setup,
     Peers,
+    Update {
+        #[arg(long)]
+        repo_url: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        tag: Option<String>,
+        #[arg(long)]
+        rev: Option<String>,
+    },
     Node {
         #[command(subcommand)]
         command: NodeCommand,
@@ -95,6 +106,10 @@ pub enum CliError {
     PeerNotFound,
     #[error("could not determine home directory; pass --config and --data-dir")]
     HomeDir,
+    #[error("set only one of --branch, --tag or --rev")]
+    MultipleUpdateRefs,
+    #[error("update command failed: {0}")]
+    UpdateFailed(String),
 }
 
 #[derive(Debug, Serialize)]
@@ -132,6 +147,12 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
     match cli.command {
         Command::Setup => setup(client).await,
         Command::Peers => peers(client).await,
+        Command::Update {
+            repo_url,
+            branch,
+            tag,
+            rev,
+        } => update(repo_url, branch, tag, rev),
         Command::Node { command } => match command {
             NodeCommand::Init {
                 config,
@@ -154,6 +175,80 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
             wait_secs,
         } => ask(client, &text, &room, wait_secs).await,
         Command::Chat { room, after_ms } => chat(client, &room, after_ms).await,
+    }
+}
+
+fn update(
+    repo_url: Option<String>,
+    branch: Option<String>,
+    tag: Option<String>,
+    rev: Option<String>,
+) -> Result<String, CliError> {
+    if [branch.is_some(), tag.is_some(), rev.is_some()]
+        .into_iter()
+        .filter(|value| *value)
+        .count()
+        > 1
+    {
+        return Err(CliError::MultipleUpdateRefs);
+    }
+
+    let repo_url = repo_url
+        .or_else(|| env::var("HIVEMIND_REPO_URL").ok())
+        .unwrap_or_else(|| DEFAULT_REPO_URL.to_owned());
+    let branch = branch.or_else(|| env::var("HIVEMIND_BRANCH").ok());
+    let tag = tag.or_else(|| env::var("HIVEMIND_TAG").ok());
+    let rev = rev.or_else(|| env::var("HIVEMIND_REV").ok());
+    if [branch.is_some(), tag.is_some(), rev.is_some()]
+        .into_iter()
+        .filter(|value| *value)
+        .count()
+        > 1
+    {
+        return Err(CliError::MultipleUpdateRefs);
+    }
+
+    for package in ["hivemind-cli", "hivemind-node"] {
+        update_package(
+            package,
+            &repo_url,
+            branch.as_deref(),
+            tag.as_deref(),
+            rev.as_deref(),
+        )?;
+    }
+    Ok("HIVEMIND updated. Run `hive node status` to verify your local node.".to_owned())
+}
+
+fn update_package(
+    package: &str,
+    repo_url: &str,
+    branch: Option<&str>,
+    tag: Option<&str>,
+    rev: Option<&str>,
+) -> Result<(), CliError> {
+    let mut command = ProcessCommand::new("cargo");
+    command
+        .arg("install")
+        .arg("--git")
+        .arg(repo_url)
+        .arg(package)
+        .arg("--locked")
+        .arg("--force");
+    if let Some(branch) = branch {
+        command.arg("--branch").arg(branch);
+    } else if let Some(tag) = tag {
+        command.arg("--tag").arg(tag);
+    } else if let Some(rev) = rev {
+        command.arg("--rev").arg(rev);
+    }
+    let status = command.status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CliError::UpdateFailed(format!(
+            "cargo install {package} exited with {status}"
+        )))
     }
 }
 
@@ -563,6 +658,28 @@ mod tests {
             Cli::parse_from(["hive", "setup"]),
             Cli {
                 command: Command::Setup
+            }
+        );
+    }
+
+    #[test]
+    fn parses_update() {
+        assert_eq!(
+            Cli::parse_from([
+                "hive",
+                "update",
+                "--repo-url",
+                "https://github.com/nootr/hivemind",
+                "--branch",
+                "main"
+            ]),
+            Cli {
+                command: Command::Update {
+                    repo_url: Some("https://github.com/nootr/hivemind".to_owned()),
+                    branch: Some("main".to_owned()),
+                    tag: None,
+                    rev: None,
+                }
             }
         );
     }

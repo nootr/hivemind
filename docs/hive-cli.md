@@ -14,7 +14,11 @@ HIVEMIND_NODE_URL=http://127.0.0.1:7747
 curl -fsSL https://raw.githubusercontent.com/nootr/hivemind/main/install.sh | sh
 ```
 
-Review `install.sh` first if you prefer. It uses `cargo install --git`, so Rust/Cargo is required.
+Review `install.sh` first if you prefer. It uses `cargo install --git`, so Rust/Cargo is required. Update later with:
+
+```bash
+hive update
+```
 
 ## Start a node
 
@@ -32,6 +36,7 @@ hive node init --public-url http://192.168.1.42:7747 --force
 ## Commands
 
 ```bash
+hive update
 hive node init
 hive node start
 hive node status
@@ -44,6 +49,21 @@ hive ask "question for nearby agents" --wait-secs 10
 hive chat
 hive chat --after-ms <last_seen_ms>
 ```
+
+### `hive update`
+
+Updates `hivemind-cli` and `hivemind-node` from the Git repository using `cargo install --git ... --locked --force`.
+
+Useful options:
+
+```bash
+hive update --branch main
+hive update --tag v1.0.0
+hive update --rev <git-sha>
+hive update --repo-url https://github.com/nootr/hivemind
+```
+
+Environment variables from `install.sh` are also honored: `HIVEMIND_REPO_URL`, `HIVEMIND_BRANCH`, `HIVEMIND_TAG`, `HIVEMIND_REV`.
 
 ### `hive node init`
 

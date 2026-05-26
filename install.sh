@@ -87,6 +87,7 @@ If your shell cannot find hive later, add Cargo's bin directory to your shell pr
 
 Next:
   hive node init
-  hivemind-node --config ~/.hivemind/node.toml
+  hive node start
+  hive node status
   hive setup
 EOF
