@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use crate::state::{
     AuditEvent, ConsumedInvite, NodeStateStoreError, SqliteNodeStateStore,
-    CLIENT_TOKEN_SCOPE_MEMORY, DEFAULT_CLIENT_TOKEN_TTL_MS,
+    CLIENT_TOKEN_SCOPE_MEMORY_IMPORT, CLIENT_TOKEN_SCOPE_MEMORY_READ,
+    CLIENT_TOKEN_SCOPE_MEMORY_WRITE, DEFAULT_CLIENT_TOKEN_SCOPES, DEFAULT_CLIENT_TOKEN_TTL_MS,
 };
 
 #[derive(Clone, Debug)]
@@ -407,21 +408,68 @@ impl IntoResponse for ApiError {
 
 pub fn app(state: AppState) -> Router {
     let protected_routes = Router::new()
-        .route("/v1/objects", post(publish_object))
-        .route("/v1/objects/envelope", post(import_object_envelope))
+        .route(
+            "/v1/objects",
+            post(publish_object).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_WRITE),
+                require_any_auth,
+            )),
+        )
+        .route(
+            "/v1/objects/envelope",
+            post(import_object_envelope).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_IMPORT),
+                require_any_auth,
+            )),
+        )
         .route(
             "/v1/objects/envelope/plan",
-            post(plan_object_envelope_import),
+            post(plan_object_envelope_import).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_IMPORT),
+                require_any_auth,
+            )),
         )
-        .route("/v1/objects/{object_id}", get(get_object))
-        .route("/v1/objects/{object_id}/envelope", get(get_object_envelope))
-        .route("/v1/objects/{object_id}/referrers", get(get_referrers))
-        .route("/v1/chunks/{chunk_id}", get(get_chunk).put(put_chunk))
-        .route("/v1/tags/{tag}", get(get_tag))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_any_auth,
-        ));
+        .route(
+            "/v1/objects/{object_id}",
+            get(get_object).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_READ),
+                require_any_auth,
+            )),
+        )
+        .route(
+            "/v1/objects/{object_id}/envelope",
+            get(get_object_envelope).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_READ),
+                require_any_auth,
+            )),
+        )
+        .route(
+            "/v1/objects/{object_id}/referrers",
+            get(get_referrers).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_READ),
+                require_any_auth,
+            )),
+        )
+        .route(
+            "/v1/chunks/{chunk_id}",
+            get(get_chunk)
+                .route_layer(middleware::from_fn_with_state(
+                    AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_READ),
+                    require_any_auth,
+                ))
+                .put(put_chunk)
+                .layer(middleware::from_fn_with_state(
+                    AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_IMPORT),
+                    require_any_auth,
+                )),
+        )
+        .route(
+            "/v1/tags/{tag}",
+            get(get_tag).route_layer(middleware::from_fn_with_state(
+                AuthzState::new(state.clone(), CLIENT_TOKEN_SCOPE_MEMORY_READ),
+                require_any_auth,
+            )),
+        );
 
     let admin_routes = Router::new()
         .route("/v1/audit", get(get_audit_log))
@@ -461,13 +509,28 @@ async fn require_admin_auth(
     Ok(next.run(request).await)
 }
 
+#[derive(Clone)]
+struct AuthzState {
+    app: AppState,
+    required_scope: &'static str,
+}
+
+impl AuthzState {
+    fn new(app: AppState, required_scope: &'static str) -> Self {
+        Self {
+            app,
+            required_scope,
+        }
+    }
+}
+
 async fn require_any_auth(
-    State(state): State<AppState>,
+    State(authz): State<AuthzState>,
     headers: HeaderMap,
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, ApiError> {
-    if !has_admin_auth(&state.config, &headers) && !has_client_auth(&state, &headers).await? {
+    if !has_admin_auth(&authz.app.config, &headers) && !has_client_auth(&authz, &headers).await? {
         return Err(ApiError::Unauthorized);
     }
 
@@ -485,15 +548,16 @@ fn has_admin_auth(config: &ApiConfig, headers: &HeaderMap) -> bool {
     bearer_token(headers).is_some_and(|token| token == config.admin_token)
 }
 
-async fn has_client_auth(state: &AppState, headers: &HeaderMap) -> Result<bool, ApiError> {
+async fn has_client_auth(authz: &AuthzState, headers: &HeaderMap) -> Result<bool, ApiError> {
     let Some(token) = bearer_token(headers) else {
         return Ok(false);
     };
-    let now_ms = state.clock.now_ms().await.map_err(app_error)?;
-    state
+    let now_ms = authz.app.clock.now_ms().await.map_err(app_error)?;
+    authz
+        .app
         .config
         .state_store
-        .has_client_token(token, now_ms)
+        .has_client_token(token, now_ms, authz.required_scope)
         .map_err(state_error)
 }
 
@@ -634,7 +698,7 @@ async fn join_invite(
             now_ms,
             &api_token,
             api_token_expires_at_ms,
-            CLIENT_TOKEN_SCOPE_MEMORY,
+            DEFAULT_CLIENT_TOKEN_SCOPES,
         )
         .map_err(state_error)?
     {
@@ -649,7 +713,7 @@ async fn join_invite(
         "join_exchanged",
         Some(&redacted_secret("invite", &invite_code)),
         &format!(
-            "node_url={node_url} token={} token_expires_at_ms={api_token_expires_at_ms} scope={CLIENT_TOKEN_SCOPE_MEMORY}",
+            "node_url={node_url} token={} token_expires_at_ms={api_token_expires_at_ms} scopes={DEFAULT_CLIENT_TOKEN_SCOPES}",
             redacted_secret("token", &api_token)
         ),
     )?;
@@ -659,7 +723,7 @@ async fn join_invite(
         node_url,
         api_token,
         api_token_expires_at_ms,
-        api_token_scope: CLIENT_TOKEN_SCOPE_MEMORY.to_owned(),
+        api_token_scope: DEFAULT_CLIENT_TOKEN_SCOPES.to_owned(),
         peers,
     }))
 }
@@ -1534,7 +1598,7 @@ mod tests {
         let joined: JoinInviteResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(joined.node_url, "https://hive.example.internal");
         assert_ne!(joined.api_token, "secret");
-        assert_eq!(joined.api_token_scope, CLIENT_TOKEN_SCOPE_MEMORY);
+        assert_eq!(joined.api_token_scope, DEFAULT_CLIENT_TOKEN_SCOPES);
         assert_eq!(
             joined.api_token_expires_at_ms,
             1_700_000_000_000 + DEFAULT_CLIENT_TOKEN_TTL_MS
@@ -1783,6 +1847,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_only_client_token_can_read_but_not_write_or_import() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_store = Arc::new(SqliteNodeStateStore::in_memory().unwrap());
+        let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        state_store
+            .insert_client_token(token, 1, 2_000_000_000_000, CLIENT_TOKEN_SCOPE_MEMORY_READ)
+            .unwrap();
+        let router = test_app_with_state_store(&tempdir, state_store).router;
+
+        let response = router
+            .clone()
+            .oneshot(authorized_get_request_with_token("/v1/tags/unknown", token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/objects")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "object_type": "fact",
+                            "mime_type": "text/plain",
+                            "payload_base64": STANDARD.encode(b"hello"),
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/objects/envelope/plan")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"envelope_cbor_base64": "invalid"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn legacy_memory_scope_can_read_write_and_import() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_store = Arc::new(SqliteNodeStateStore::in_memory().unwrap());
+        let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        state_store
+            .insert_client_token(token, 1, 2_000_000_000_000, "memory")
+            .unwrap();
+        let router = test_app_with_state_store(&tempdir, state_store).router;
+
+        let response = router
+            .clone()
+            .oneshot(authorized_get_request_with_token("/v1/tags/unknown", token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/objects")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "object_type": "fact",
+                            "mime_type": "text/plain",
+                            "payload_base64": STANDARD.encode(b"hello"),
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/objects/envelope/plan")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"envelope_cbor_base64": "invalid"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn expired_client_token_is_unauthorized() {
         let tempdir = tempfile::tempdir().unwrap();
         let state_store = Arc::new(SqliteNodeStateStore::in_memory().unwrap());
@@ -1791,7 +1967,7 @@ mod tests {
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 1,
                 2,
-                CLIENT_TOKEN_SCOPE_MEMORY,
+                CLIENT_TOKEN_SCOPE_MEMORY_READ,
             )
             .unwrap();
         let router = test_app_with_state_store(&tempdir, state_store).router;

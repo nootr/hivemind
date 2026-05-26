@@ -5,6 +5,10 @@ use std::{fs::OpenOptions, path::Path, sync::Mutex};
 use crate::api::{InviteRecord, PeerRecord, PeerSummary};
 
 pub const CLIENT_TOKEN_SCOPE_MEMORY: &str = "memory";
+pub const CLIENT_TOKEN_SCOPE_MEMORY_READ: &str = "memory:read";
+pub const CLIENT_TOKEN_SCOPE_MEMORY_WRITE: &str = "memory:write";
+pub const CLIENT_TOKEN_SCOPE_MEMORY_IMPORT: &str = "memory:import";
+pub const DEFAULT_CLIENT_TOKEN_SCOPES: &str = "memory:read memory:write memory:import";
 pub const DEFAULT_CLIENT_TOKEN_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, thiserror::Error)]
@@ -134,17 +138,19 @@ impl SqliteNodeStateStore {
         if expires_at_ms <= now_ms {
             return Ok(ClientTokenStatus::Expired);
         }
-        if scope != required_scope {
+        if !scope_allows(&scope, required_scope) {
             return Ok(ClientTokenStatus::WrongScope);
         }
         Ok(ClientTokenStatus::Valid)
     }
 
-    pub fn has_client_token(&self, token: &str, now_ms: u64) -> NodeStateStoreResult<bool> {
-        Ok(
-            self.client_token_status(token, now_ms, CLIENT_TOKEN_SCOPE_MEMORY)?
-                == ClientTokenStatus::Valid,
-        )
+    pub fn has_client_token(
+        &self,
+        token: &str,
+        now_ms: u64,
+        required_scope: &str,
+    ) -> NodeStateStoreResult<bool> {
+        Ok(self.client_token_status(token, now_ms, required_scope)? == ClientTokenStatus::Valid)
     }
 
     pub fn insert_client_token(
@@ -336,6 +342,12 @@ impl SqliteNodeStateStore {
     }
 }
 
+fn scope_allows(granted_scope: &str, required_scope: &str) -> bool {
+    granted_scope
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .any(|scope| scope == required_scope || scope == CLIENT_TOKEN_SCOPE_MEMORY)
+}
+
 fn prepare_state_file(path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path
         .parent()
@@ -487,20 +499,20 @@ mod tests {
         let path = tempdir.path().join("state.sqlite3");
         SqliteNodeStateStore::open(&path)
             .unwrap()
-            .insert_client_token("client-token", 1000, 2000, CLIENT_TOKEN_SCOPE_MEMORY)
+            .insert_client_token("client-token", 1000, 2000, DEFAULT_CLIENT_TOKEN_SCOPES)
             .unwrap();
 
         let store = SqliteNodeStateStore::open(&path).unwrap();
 
         assert_eq!(
             store
-                .client_token_status("client-token", 1500, CLIENT_TOKEN_SCOPE_MEMORY)
+                .client_token_status("client-token", 1500, CLIENT_TOKEN_SCOPE_MEMORY_READ)
                 .unwrap(),
             ClientTokenStatus::Valid
         );
         assert_eq!(
             store
-                .client_token_status("client-token", 2000, CLIENT_TOKEN_SCOPE_MEMORY)
+                .client_token_status("client-token", 2000, CLIENT_TOKEN_SCOPE_MEMORY_READ)
                 .unwrap(),
             ClientTokenStatus::Expired
         );
@@ -512,7 +524,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .client_token_status("other-token", 1500, CLIENT_TOKEN_SCOPE_MEMORY)
+                .client_token_status("other-token", 1500, CLIENT_TOKEN_SCOPE_MEMORY_READ)
                 .unwrap(),
             ClientTokenStatus::NotFound
         );
@@ -520,7 +532,7 @@ mod tests {
         assert!(store.revoke_client_token("client-token", 1600).unwrap());
         assert_eq!(
             store
-                .client_token_status("client-token", 1700, CLIENT_TOKEN_SCOPE_MEMORY)
+                .client_token_status("client-token", 1700, CLIENT_TOKEN_SCOPE_MEMORY_READ)
                 .unwrap(),
             ClientTokenStatus::Revoked
         );

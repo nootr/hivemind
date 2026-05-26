@@ -21,6 +21,7 @@ pub use dev_identity::DevIdentity;
 pub use file_identity::{FileIdentity, FileIdentityError};
 pub use state::{
     AuditEvent, ClientTokenStatus, ConsumedInvite, NodeStateStoreError, SqliteNodeStateStore,
-    CLIENT_TOKEN_SCOPE_MEMORY, DEFAULT_CLIENT_TOKEN_TTL_MS,
+    CLIENT_TOKEN_SCOPE_MEMORY, CLIENT_TOKEN_SCOPE_MEMORY_IMPORT, CLIENT_TOKEN_SCOPE_MEMORY_READ,
+    CLIENT_TOKEN_SCOPE_MEMORY_WRITE, DEFAULT_CLIENT_TOKEN_SCOPES, DEFAULT_CLIENT_TOKEN_TTL_MS,
 };
 pub use token::{load_or_create_token, TokenError};

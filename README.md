@@ -10,7 +10,7 @@ HIVEMIND is designed for small team-owned nodes first. A team can run a local or
 
 Early alpha implementation. The current milestone focuses on team memory primitives: a local HTTP node, content-addressed objects, signed provenance, chunk transfer, exact tag discovery, a `hive` CLI and a Hive Agent Skill.
 
-Not production-ready yet. Client tokens, invites, peers and audit events are persisted in local SQLite state, and client tokens now have expiry, revocation and a memory scope. Production still needs narrower scope policy, trusted sync and deployment hardening; see [production readiness](docs/architecture-v1.md#13-production-readiness).
+Not production-ready yet. Client tokens, invites, peers and audit events are persisted in local SQLite state, and client tokens now have expiry, revocation and route-level memory scopes. Production still needs trusted sync, packaging and deployment hardening; see [production readiness](docs/architecture-v1.md#13-production-readiness).
 
 ## Hive CLI
 

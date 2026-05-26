@@ -218,7 +218,7 @@ curl -sS \
   http://127.0.0.1:7747/v1/join
 ```
 
-Invite links contain short-lived codes, not admin API tokens. Join returns a generated client token with expiry and the `memory` scope. Admins can revoke generated client tokens through `POST /v1/client-tokens/{token}/revoke` and inspect security events through `GET /v1/audit`. Join responses may include peer candidates; clients must keep them untrusted until a user explicitly trusts them.
+Invite links contain short-lived codes, not admin API tokens. Join returns a generated client token with expiry and `memory:read memory:write memory:import` scopes. Admins can revoke generated client tokens through `POST /v1/client-tokens/{token}/revoke` and inspect security events through `GET /v1/audit`. Join responses may include peer candidates; clients must keep them untrusted until a user explicitly trusts them.
 
 A node admin can register a peer candidate on a running node:
 

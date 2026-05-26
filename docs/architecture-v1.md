@@ -259,7 +259,7 @@ Running your own node?
 
 `hive init` writes local CLI config. `hive share` shows whether the configured node URL is local-only or shareable. For reachable nodes it asks `POST /v1/invites` for a short-lived, limited-use invite and prints a `hive join ...` command.
 
-Invite links must not include the admin API token. They carry a short-lived invite code that `hive join` exchanges through `POST /v1/join` for a generated, expiring client token in local config. Generated client tokens currently carry the `memory` scope and can be revoked by an admin through `POST /v1/client-tokens/{token}/revoke`.
+Invite links must not include the admin API token. They carry a short-lived invite code that `hive join` exchanges through `POST /v1/join` for a generated, expiring client token in local config. Generated client tokens currently carry `memory:read memory:write memory:import` scopes and can be revoked by an admin through `POST /v1/client-tokens/{token}/revoke`. Legacy `memory` scoped tokens remain compatible as all-memory tokens.
 
 The join response can include known peer node URLs and node IDs/public-key fingerprints. The CLI stores these as untrusted peer candidates. Trust is based on node ID, not URL or IP address. Trust is local and manual: agents must ask the user before running `hive peer trust <node-id>`.
 
@@ -318,7 +318,6 @@ This implementation is an alpha/local team prototype, not production-ready.
 
 Production blockers:
 
-- Add narrower per-route client-token scope policy beyond the current memory scope.
 - Add a clear node public-key/fingerprint confirmation UX before trust.
 - Harden UDP discovery with rate limits, validation and deployment guidance for VPNs/subnets.
 - Implement trusted peer sync; current two-node flow is still manual transfer.
@@ -328,10 +327,9 @@ Production blockers:
 
 ## 14. Near-term production path
 
-1. Add narrower per-route client-token scope policy beyond the current memory scope.
-2. Add trusted team peer sync.
-3. Package the node and CLI for local/team installation.
-4. Add better search beyond exact tags.
-5. Add update/supersede/tombstone UX for memory hygiene.
-6. Add team/workspace configuration.
-7. Add admin docs for private deployment, backups and migrations.
+1. Add trusted team peer sync.
+2. Package the node and CLI for local/team installation.
+3. Add better search beyond exact tags.
+4. Add update/supersede/tombstone UX for memory hygiene.
+5. Add team/workspace configuration.
+6. Add admin docs for private deployment, backups and migrations.
