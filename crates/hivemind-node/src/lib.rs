@@ -12,11 +12,15 @@ pub use api::{
     ImportObjectEnvelopeRequest, ImportObjectEnvelopeResponse, InviteRecord, JoinInviteRequest,
     JoinInviteResponse, ObjectSummary, PeerListResponse, PeerRecord, PeerSummary,
     PlanObjectEnvelopeImportRequest, PlanObjectEnvelopeImportResponse, PublishObjectRequest,
-    PublishObjectResponse, PutChunkRequest, PutChunkResponse, ReferrersResponse, SystemClock,
-    TagLookupResponse, TransferChunk, UpsertPeerRequest, UpsertPeerResponse,
+    PublishObjectResponse, PutChunkRequest, PutChunkResponse, ReferrersResponse,
+    RevokeClientTokenResponse, SystemClock, TagLookupResponse, TransferChunk, UpsertPeerRequest,
+    UpsertPeerResponse,
 };
 pub use config::{ApiFileConfig, ConfigError, DataConfig, IdentityConfig, NodeConfig};
 pub use dev_identity::DevIdentity;
 pub use file_identity::{FileIdentity, FileIdentityError};
-pub use state::{ConsumedInvite, NodeStateStoreError, SqliteNodeStateStore};
+pub use state::{
+    ClientTokenStatus, ConsumedInvite, NodeStateStoreError, SqliteNodeStateStore,
+    CLIENT_TOKEN_SCOPE_MEMORY, DEFAULT_CLIENT_TOKEN_TTL_MS,
+};
 pub use token::{load_or_create_token, TokenError};

@@ -3,6 +3,9 @@ use std::{fs::OpenOptions, path::Path, sync::Mutex};
 
 use crate::api::{InviteRecord, PeerRecord, PeerSummary};
 
+pub const CLIENT_TOKEN_SCOPE_MEMORY: &str = "memory";
+pub const DEFAULT_CLIENT_TOKEN_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeStateStoreError {
     #[error("sqlite state error: {0}")]
@@ -23,6 +26,15 @@ pub type NodeStateStoreResult<T> = Result<T, NodeStateStoreError>;
 #[derive(Debug)]
 pub struct SqliteNodeStateStore {
     connection: Mutex<Connection>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum ClientTokenStatus {
+    Valid,
+    NotFound,
+    Expired,
+    Revoked,
+    WrongScope,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -60,35 +72,107 @@ impl SqliteNodeStateStore {
             .lock()
             .map_err(|_| NodeStateStoreError::LockPoisoned)?;
         connection.execute_batch(MIGRATIONS)?;
+        add_column_if_missing(&connection, "client_tokens", "expires_at_ms", "INTEGER")?;
+        add_column_if_missing(&connection, "client_tokens", "revoked_at_ms", "INTEGER")?;
+        add_column_if_missing(
+            &connection,
+            "client_tokens",
+            "scope",
+            "TEXT NOT NULL DEFAULT 'memory'",
+        )?;
+        connection.execute(
+            "UPDATE client_tokens
+             SET expires_at_ms = created_at_ms + ?1
+             WHERE expires_at_ms IS NULL",
+            params![DEFAULT_CLIENT_TOKEN_TTL_MS as i64],
+        )?;
         Ok(())
     }
 
-    pub fn has_client_token(&self, token: &str) -> NodeStateStoreResult<bool> {
+    pub fn client_token_status(
+        &self,
+        token: &str,
+        now_ms: u64,
+        required_scope: &str,
+    ) -> NodeStateStoreResult<ClientTokenStatus> {
         let connection = self
             .connection
             .lock()
             .map_err(|_| NodeStateStoreError::LockPoisoned)?;
-        let exists = connection
+        let Some((expires_at_ms, revoked_at_ms, scope)) = connection
             .query_row(
-                "SELECT 1 FROM client_tokens WHERE token = ?1",
+                "SELECT expires_at_ms, revoked_at_ms, scope
+                 FROM client_tokens
+                 WHERE token = ?1",
                 params![token],
-                |_| Ok(()),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as u64,
+                        row.get::<_, Option<i64>>(1)?.map(|value| value as u64),
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()?
-            .is_some();
-        Ok(exists)
+        else {
+            return Ok(ClientTokenStatus::NotFound);
+        };
+
+        if revoked_at_ms.is_some() {
+            return Ok(ClientTokenStatus::Revoked);
+        }
+        if expires_at_ms <= now_ms {
+            return Ok(ClientTokenStatus::Expired);
+        }
+        if scope != required_scope {
+            return Ok(ClientTokenStatus::WrongScope);
+        }
+        Ok(ClientTokenStatus::Valid)
     }
 
-    pub fn insert_client_token(&self, token: &str) -> NodeStateStoreResult<()> {
+    pub fn has_client_token(&self, token: &str, now_ms: u64) -> NodeStateStoreResult<bool> {
+        Ok(
+            self.client_token_status(token, now_ms, CLIENT_TOKEN_SCOPE_MEMORY)?
+                == ClientTokenStatus::Valid,
+        )
+    }
+
+    pub fn insert_client_token(
+        &self,
+        token: &str,
+        created_at_ms: u64,
+        expires_at_ms: u64,
+        scope: &str,
+    ) -> NodeStateStoreResult<()> {
         let connection = self
             .connection
             .lock()
             .map_err(|_| NodeStateStoreError::LockPoisoned)?;
         connection.execute(
-            "INSERT OR IGNORE INTO client_tokens (token, created_at_ms) VALUES (?1, 0)",
-            params![token],
+            "INSERT OR IGNORE INTO client_tokens (
+                token, created_at_ms, expires_at_ms, revoked_at_ms, scope
+             ) VALUES (?1, ?2, ?3, NULL, ?4)",
+            params![token, created_at_ms as i64, expires_at_ms as i64, scope],
         )?;
         Ok(())
+    }
+
+    pub fn revoke_client_token(
+        &self,
+        token: &str,
+        revoked_at_ms: u64,
+    ) -> NodeStateStoreResult<bool> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| NodeStateStoreError::LockPoisoned)?;
+        let updated = connection.execute(
+            "UPDATE client_tokens
+             SET revoked_at_ms = COALESCE(revoked_at_ms, ?2)
+             WHERE token = ?1",
+            params![token, revoked_at_ms as i64],
+        )?;
+        Ok(updated > 0)
     }
 
     pub fn insert_invite(
@@ -137,6 +221,8 @@ impl SqliteNodeStateStore {
         invite_code: &str,
         now_ms: u64,
         token: &str,
+        token_expires_at_ms: u64,
+        scope: &str,
     ) -> NodeStateStoreResult<ConsumedInvite> {
         let mut connection = self
             .connection
@@ -146,8 +232,10 @@ impl SqliteNodeStateStore {
         let consumed = consume_invite_in_tx(&tx, invite_code, now_ms)?;
         if matches!(consumed, ConsumedInvite::Active { .. }) {
             tx.execute(
-                "INSERT OR IGNORE INTO client_tokens (token, created_at_ms) VALUES (?1, ?2)",
-                params![token, now_ms as i64],
+                "INSERT OR IGNORE INTO client_tokens (
+                    token, created_at_ms, expires_at_ms, revoked_at_ms, scope
+                 ) VALUES (?1, ?2, ?3, NULL, ?4)",
+                params![token, now_ms as i64, token_expires_at_ms as i64, scope,],
             )?;
         }
         tx.commit()?;
@@ -222,6 +310,26 @@ fn prepare_state_file(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn add_column_if_missing(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> NodeStateStoreResult<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == column);
+    if !exists {
+        connection.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition};"
+        ))?;
+    }
+    Ok(())
+}
+
 fn consume_invite_in_tx(
     tx: &rusqlite::Transaction<'_>,
     invite_code: &str,
@@ -274,7 +382,10 @@ fn consume_invite_in_tx(
 const MIGRATIONS: &str = r#"
 CREATE TABLE IF NOT EXISTS client_tokens (
     token TEXT PRIMARY KEY NOT NULL,
-    created_at_ms INTEGER NOT NULL DEFAULT 0
+    created_at_ms INTEGER NOT NULL DEFAULT 0,
+    expires_at_ms INTEGER,
+    revoked_at_ms INTEGER,
+    scope TEXT NOT NULL DEFAULT 'memory'
 );
 
 CREATE TABLE IF NOT EXISTS invites (
@@ -309,18 +420,89 @@ mod tests {
     }
 
     #[test]
-    fn client_tokens_persist() {
+    fn client_tokens_persist_with_expiry_scope_and_revocation() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("state.sqlite3");
         SqliteNodeStateStore::open(&path)
             .unwrap()
-            .insert_client_token("client-token")
+            .insert_client_token("client-token", 1000, 2000, CLIENT_TOKEN_SCOPE_MEMORY)
             .unwrap();
 
         let store = SqliteNodeStateStore::open(&path).unwrap();
 
-        assert!(store.has_client_token("client-token").unwrap());
-        assert!(!store.has_client_token("other-token").unwrap());
+        assert_eq!(
+            store
+                .client_token_status("client-token", 1500, CLIENT_TOKEN_SCOPE_MEMORY)
+                .unwrap(),
+            ClientTokenStatus::Valid
+        );
+        assert_eq!(
+            store
+                .client_token_status("client-token", 2000, CLIENT_TOKEN_SCOPE_MEMORY)
+                .unwrap(),
+            ClientTokenStatus::Expired
+        );
+        assert_eq!(
+            store
+                .client_token_status("client-token", 1500, "admin")
+                .unwrap(),
+            ClientTokenStatus::WrongScope
+        );
+        assert_eq!(
+            store
+                .client_token_status("other-token", 1500, CLIENT_TOKEN_SCOPE_MEMORY)
+                .unwrap(),
+            ClientTokenStatus::NotFound
+        );
+
+        assert!(store.revoke_client_token("client-token", 1600).unwrap());
+        assert_eq!(
+            store
+                .client_token_status("client-token", 1700, CLIENT_TOKEN_SCOPE_MEMORY)
+                .unwrap(),
+            ClientTokenStatus::Revoked
+        );
+    }
+
+    #[test]
+    fn legacy_client_token_rows_get_default_expiry_and_scope() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("state.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE client_tokens (
+                    token TEXT PRIMARY KEY NOT NULL,
+                    created_at_ms INTEGER NOT NULL DEFAULT 0
+                );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO client_tokens (token, created_at_ms) VALUES (?1, ?2)",
+                params!["legacy-token", 1000_i64],
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = SqliteNodeStateStore::open(&path).unwrap();
+
+        assert_eq!(
+            store
+                .client_token_status("legacy-token", 1001, CLIENT_TOKEN_SCOPE_MEMORY)
+                .unwrap(),
+            ClientTokenStatus::Valid
+        );
+        assert_eq!(
+            store
+                .client_token_status(
+                    "legacy-token",
+                    1000 + DEFAULT_CLIENT_TOKEN_TTL_MS,
+                    CLIENT_TOKEN_SCOPE_MEMORY,
+                )
+                .unwrap(),
+            ClientTokenStatus::Expired
+        );
     }
 
     #[test]

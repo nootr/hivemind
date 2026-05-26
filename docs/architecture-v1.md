@@ -172,7 +172,7 @@ Filesystem content is the canonical memory truth. `metadata.sqlite3` is an index
 
 Node control-plane state is stored separately in `state.sqlite3`:
 
-- generated client tokens
+- generated client tokens, expiry, revocation timestamp and scope
 - invite codes, expiry and remaining uses
 - peer node URLs, node IDs/public-key fingerprints and trust flags
 
@@ -194,6 +194,7 @@ PUT  /v1/chunks/{chunk_id}
 POST /v1/invites
 GET  /v1/peers
 POST /v1/peers
+POST /v1/client-tokens/{token}/revoke
 GET  /v1/tags/{tag}
 ```
 
@@ -256,7 +257,7 @@ Running your own node?
 
 `hive init` writes local CLI config. `hive share` shows whether the configured node URL is local-only or shareable. For reachable nodes it asks `POST /v1/invites` for a short-lived, limited-use invite and prints a `hive join ...` command.
 
-Invite links must not include the admin API token. They carry a short-lived invite code that `hive join` exchanges through `POST /v1/join` for a generated client token in local config.
+Invite links must not include the admin API token. They carry a short-lived invite code that `hive join` exchanges through `POST /v1/join` for a generated, expiring client token in local config. Generated client tokens currently carry the `memory` scope and can be revoked by an admin through `POST /v1/client-tokens/{token}/revoke`.
 
 The join response can include known peer node URLs and node IDs/public-key fingerprints. The CLI stores these as untrusted peer candidates. Trust is based on node ID, not URL or IP address. Trust is local and manual: agents must ask the user before running `hive peer trust <node-id>`.
 
@@ -315,8 +316,8 @@ This implementation is an alpha/local team prototype, not production-ready.
 
 Production blockers:
 
-- Add client-token expiry, revocation and narrower scopes.
-- Add audit logs for invite creation, join exchanges and trust changes.
+- Add audit logs for invite creation, join exchanges, token revocation and trust changes.
+- Add narrower per-route client-token scope policy beyond the current memory scope.
 - Add a clear node public-key/fingerprint confirmation UX before trust.
 - Harden UDP discovery with rate limits, validation and deployment guidance for VPNs/subnets.
 - Implement trusted peer sync; current two-node flow is still manual transfer.
@@ -326,10 +327,11 @@ Production blockers:
 
 ## 14. Near-term production path
 
-1. Add client-token revocation, expiry and narrower scopes.
-2. Add trusted team peer sync.
-3. Package the node and CLI for local/team installation.
-4. Add better search beyond exact tags.
-5. Add update/supersede/tombstone UX for memory hygiene.
-6. Add team/workspace configuration.
-7. Add admin docs for private deployment, backups and migrations.
+1. Add audit logs for invite creation, join exchanges, token revocation and trust changes.
+2. Add narrower per-route client-token scope policy beyond the current memory scope.
+3. Add trusted team peer sync.
+4. Package the node and CLI for local/team installation.
+5. Add better search beyond exact tags.
+6. Add update/supersede/tombstone UX for memory hygiene.
+7. Add team/workspace configuration.
+8. Add admin docs for private deployment, backups and migrations.
