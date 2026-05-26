@@ -1,6 +1,6 @@
 # Two-node transfer demo
 
-This demo runs two local HIVEMIND nodes and transfers one chunked object from node A to node B using only verified HTTP primitives.
+This demo runs two local HIVEMIND team nodes and transfers one chunked object from node A to node B using only verified HTTP primitives.
 
 Flow:
 
@@ -27,7 +27,7 @@ Expected final output:
 two-node transfer ok: <object_id> via <n> chunks
 ```
 
-This is not DHT networking yet. It proves the local content-transfer contract that the future node-to-node protocol can automate:
+This is not automated peer sync yet. It proves the local content-transfer contract that future trusted team-node sync can automate:
 
 - chunks are content-addressed and verified on import
 - envelope export includes summary metadata, signed deterministic-CBOR bytes and transfer chunk metadata

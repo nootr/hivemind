@@ -1,51 +1,61 @@
 ---
 name: hive
-description: Shared memory for AI agents using the HIVEMIND hive CLI. Use when a task may benefit from remembered project facts, runbooks, decisions, procedures, reusable skills, or when new durable learning should be saved for future agents.
+description: Team shared memory for AI agents using the HIVEMIND hive CLI. Use when a task may benefit from remembered team/project facts, runbooks, decisions, procedures, reusable skills, or when new durable learning should be saved for future agents in the same workspace.
 ---
 
 # Hive
 
-Use HIVEMIND as shared memory for AI agents.
+Use HIVEMIND as shared team memory for AI agents.
 
 The user-facing concept is `/hive`. The concrete tool for this skill is the `hive` CLI.
 
 ## Setup check
 
-Before first use in a workspace, verify the CLI is available and configured:
+Before first use in a workspace, verify the CLI is available and configured for the team node:
 
 ```bash
 hive --help
 ```
 
-The CLI needs:
+The CLI needs either local config from:
 
 ```bash
-HIVEMIND_NODE_URL   # optional, defaults to http://127.0.0.1:7747
-HIVEMIND_API_TOKEN  # required
+hive init --node-url http://127.0.0.1:7747 --token-file ./data/api.token
 ```
 
-If the CLI is missing or not configured, explain exactly what is missing and stop. Do not invent memory results.
+or temporary environment variables:
+
+```bash
+HIVEMIND_NODE_URL
+HIVEMIND_API_TOKEN
+```
+
+If the CLI is missing or not configured, explain exactly what is missing and mention `hive init`. Stop; do not invent memory results.
+
+### Peer trust
+
+`hive discover` may find local Hive nodes and `hive join` may store peer node IDs/public-key fingerprints as untrusted candidates. Discovery is not trust. Never trust peers automatically. If trusting a peer seems useful, ask the user first and only run `hive peer trust <node-id>` after explicit approval.
 
 ### Register that Hive is available
 
-After setup succeeds, save a small bootstrap memory so future agents can discover that this workspace uses Hive:
+After setup succeeds, save a small bootstrap memory so future agents can discover that this workspace uses Hive team memory:
 
 ```bash
-hive remember "This workspace has HIVEMIND /hive shared memory configured. Before substantive work, search Hive for relevant project facts, runbooks, decisions, procedures, and reusable skills. Save durable new learnings back to Hive when useful." \
+hive remember "This workspace has HIVEMIND /hive team memory configured. Before substantive work, search Hive for relevant project facts, runbooks, decisions, procedures, and reusable skills. Save durable new learnings back to Hive when useful." \
   --tag hive \
   --tag setup \
-  --tag agent-memory
+  --tag team-memory
 ```
 
-Do not store API tokens, secrets, credentials, private keys, or private personal data in this bootstrap memory.
+Do not store API tokens, secrets, credentials, private keys, customer secrets, or private personal data in this bootstrap memory.
 
 ## Default behavior
 
-For any non-trivial task, silently consider whether shared memory could help. Prefer checking Hive when the task involves:
+For any non-trivial task, silently consider whether team memory could help. Prefer checking Hive when the task involves:
 
 - an existing project, repository, customer, service, workflow, or incident
 - recurring procedures, runbooks, deployment steps, debugging paths, or conventions
-- decisions or constraints that may have been learned before
+- team decisions or constraints that may have been learned before
 - requests like “remember”, “save this”, “next time”, “we learned”, or “use hive”
 
 Do not ask the user whether to check memory unless the lookup could reveal sensitive information or the user asked you not to use memory.
@@ -64,11 +74,11 @@ If useful memories are found, retrieve the most relevant ones:
 hive use <object_id>
 ```
 
-Use retrieved memory as context, but still reason critically. If memory conflicts with the current repository, user instruction, or observed facts, prefer the current evidence and mention the conflict briefly.
+Use retrieved memory as team context, but still reason critically. If memory conflicts with the current repository, user instruction, or observed facts, prefer the current evidence and mention the conflict briefly.
 
 ## Save durable learnings
 
-Save memory when a task produces reusable knowledge that future agents should know, such as:
+Save memory when a task produces reusable team knowledge that future agents should know, such as:
 
 - project conventions or architecture decisions
 - confirmed fixes and debugging procedures
@@ -98,6 +108,7 @@ Do not save:
 
 - secrets, tokens, passwords, private keys, session cookies, or credentials
 - sensitive personal data unless the user explicitly requests it and it is appropriate
+- private customer data unless the team policy explicitly allows it
 - transient status updates that will be stale soon
 - guesses, unverified assumptions, or speculative conclusions
 - large raw logs or generated noise

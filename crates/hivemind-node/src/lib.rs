@@ -6,11 +6,14 @@ mod secret_file;
 mod token;
 
 pub use api::{
-    app, ApiConfig, ApiError, AppState, ErrorBody, ErrorDetails, ErrorResponse, GetChunkResponse,
-    GetObjectEnvelopeResponse, GetObjectResponse, ImportObjectEnvelopeRequest,
-    ImportObjectEnvelopeResponse, ObjectSummary, PlanObjectEnvelopeImportRequest,
-    PlanObjectEnvelopeImportResponse, PublishObjectRequest, PublishObjectResponse, PutChunkRequest,
-    PutChunkResponse, ReferrersResponse, SystemClock, TagLookupResponse, TransferChunk,
+    app, ApiConfig, ApiError, AppState, CreateInviteRequest, CreateInviteResponse, ErrorBody,
+    ErrorDetails, ErrorResponse, GetChunkResponse, GetObjectEnvelopeResponse, GetObjectResponse,
+    ImportObjectEnvelopeRequest, ImportObjectEnvelopeResponse, InviteRecord, InviteStore,
+    JoinInviteRequest, JoinInviteResponse, ObjectSummary, PeerListResponse, PeerRecord, PeerStore,
+    PeerSummary, PlanObjectEnvelopeImportRequest, PlanObjectEnvelopeImportResponse,
+    PublishObjectRequest, PublishObjectResponse, PutChunkRequest, PutChunkResponse,
+    ReferrersResponse, SystemClock, TagLookupResponse, TransferChunk, UpsertPeerRequest,
+    UpsertPeerResponse,
 };
 pub use config::{ApiFileConfig, ConfigError, DataConfig, IdentityConfig, NodeConfig};
 pub use dev_identity::DevIdentity;
