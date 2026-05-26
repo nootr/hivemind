@@ -1,18 +1,20 @@
 use hivemind_adapters::{fs::FsContentStore, sqlite::SqliteMetadataStore};
 use hivemind_node::{
-    app, load_or_create_token, ApiConfig, AppState, FileIdentity, NodeConfig, SqliteNodeStateStore,
-    SystemClock,
+    app, load_or_create_token, ApiConfig, AppState, FileIdentity, NodeConfig, PeerRecord,
+    SqliteNodeStateStore, SystemClock,
 };
 use std::{
     env,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket},
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 
 const DISCOVERY_PORT: u16 = 7748;
 const DISCOVERY_QUERY: &[u8] = b"HIVEMIND_DISCOVER_V1";
 const DISCOVERY_RESPONSE_PREFIX: &str = "HIVEMIND_NODE_V1 ";
+const DISCOVERY_BEACON_INTERVAL_SECS: u64 = 5;
 
 #[derive(Debug, thiserror::Error)]
 enum MainError {
@@ -65,11 +67,11 @@ async fn run(config: NodeConfig) -> Result<(), MainError> {
         metadata_store: Arc::new(metadata_store),
         config: ApiConfig {
             admin_token: token,
-            state_store,
+            state_store: Arc::clone(&state_store),
         },
     };
 
-    spawn_discovery_responder(bind_addr, public_url, node_id);
+    spawn_discovery_responder(bind_addr, public_url, node_id, Arc::clone(&state_store));
     serve(bind_addr, app(state)).await
 }
 
@@ -77,9 +79,11 @@ fn spawn_discovery_responder(
     api_bind_addr: SocketAddr,
     public_url: Option<String>,
     node_id: String,
+    state_store: Arc<SqliteNodeStateStore>,
 ) {
     tokio::spawn(async move {
-        if let Err(err) = discovery_responder(api_bind_addr, public_url, node_id).await {
+        if let Err(err) = discovery_responder(api_bind_addr, public_url, node_id, state_store).await
+        {
             eprintln!("hivemind discovery disabled: {err}");
         }
     });
@@ -89,23 +93,92 @@ async fn discovery_responder(
     api_bind_addr: SocketAddr,
     public_url: Option<String>,
     node_id: String,
+    state_store: Arc<SqliteNodeStateStore>,
 ) -> Result<(), std::io::Error> {
     let socket = tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT)).await?;
+    socket.set_broadcast(true)?;
     eprintln!("hivemind discovery listening on udp://0.0.0.0:{DISCOVERY_PORT}");
+    eprintln!("hivemind discovery beaconing every {DISCOVERY_BEACON_INTERVAL_SECS}s");
+    let mut interval = tokio::time::interval(Duration::from_secs(DISCOVERY_BEACON_INTERVAL_SECS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut buf = [0_u8; 1024];
 
-    loop {
-        let (len, peer) = socket.recv_from(&mut buf).await?;
-        if &buf[..len] != DISCOVERY_QUERY {
-            continue;
-        }
+    send_discovery_beacons(&socket, api_bind_addr, public_url.as_deref(), &node_id).await;
 
-        let node_url = public_url
-            .clone()
-            .unwrap_or_else(|| inferred_node_url(api_bind_addr, peer));
-        let response = format!("{DISCOVERY_RESPONSE_PREFIX}{node_url} {node_id}");
-        let _ = socket.send_to(response.as_bytes(), peer).await;
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                send_discovery_beacons(&socket, api_bind_addr, public_url.as_deref(), &node_id).await;
+            }
+            received = socket.recv_from(&mut buf) => {
+                let (len, peer) = received?;
+                if &buf[..len] == DISCOVERY_QUERY {
+                    let node_url = public_url
+                        .clone()
+                        .unwrap_or_else(|| inferred_node_url(api_bind_addr, peer));
+                    let response = format!("{DISCOVERY_RESPONSE_PREFIX}{node_url} {node_id}");
+                    let _ = socket.send_to(response.as_bytes(), peer).await;
+                    continue;
+                }
+
+                let response = String::from_utf8_lossy(&buf[..len]);
+                if let Some(rest) = response.strip_prefix(DISCOVERY_RESPONSE_PREFIX) {
+                    if let Some(peer_record) = parse_discovery_announcement(rest) {
+                        if peer_record.node_id != node_id {
+                            let _ = state_store.upsert_peer_candidate(&peer_record);
+                        }
+                    }
+                }
+            }
+        }
     }
+}
+
+async fn send_discovery_beacons(
+    socket: &tokio::net::UdpSocket,
+    api_bind_addr: SocketAddr,
+    public_url: Option<&str>,
+    node_id: &str,
+) {
+    let targets = [
+        SocketAddr::from((Ipv4Addr::BROADCAST, DISCOVERY_PORT)),
+        SocketAddr::from((Ipv4Addr::LOCALHOST, DISCOVERY_PORT)),
+    ];
+    for target in targets {
+        let node_url = public_url
+            .map(str::to_owned)
+            .unwrap_or_else(|| inferred_node_url(api_bind_addr, target));
+        let response = format!("{DISCOVERY_RESPONSE_PREFIX}{node_url} {node_id}");
+        let _ = socket.send_to(response.as_bytes(), target).await;
+    }
+}
+
+fn parse_discovery_announcement(input: &str) -> Option<PeerRecord> {
+    let mut parts = input.split_whitespace();
+    let node_url = parts.next()?.trim_end_matches('/');
+    let node_id = parts.next()?;
+    if validate_node_url(node_url) && validate_node_id(node_id) {
+        Some(PeerRecord {
+            node_url: node_url.to_owned(),
+            node_id: node_id.to_owned(),
+            trusted: false,
+        })
+    } else {
+        None
+    }
+}
+
+fn validate_node_url(node_url: &str) -> bool {
+    let Ok(uri) = node_url.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    matches!(uri.scheme_str(), Some("http" | "https"))
+        && uri.authority().is_some()
+        && !node_url.chars().any(char::is_whitespace)
+}
+
+fn validate_node_id(node_id: &str) -> bool {
+    node_id.len() == 64 && node_id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn inferred_node_url(api_bind_addr: SocketAddr, peer: SocketAddr) -> String {
@@ -159,6 +232,34 @@ mod tests {
         assert_eq!(
             inferred_node_url(api_bind_addr, peer),
             "http://127.0.0.1:7747"
+        );
+    }
+
+    #[test]
+    fn parses_valid_discovery_announcement() {
+        assert_eq!(
+            parse_discovery_announcement(
+                "https://node-a.internal aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+            Some(PeerRecord {
+                node_url: "https://node-a.internal".to_owned(),
+                node_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                trusted: false,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_discovery_announcement() {
+        assert_eq!(
+            parse_discovery_announcement(
+                "javascript:alert(1) aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_discovery_announcement("https://node-a.internal not-a-node-id"),
+            None
         );
     }
 

@@ -49,7 +49,7 @@ If setup cannot be completed, explain exactly what is missing. Stop; do not inve
 
 ### Peer trust
 
-`hive setup` / `hive discover` may find local Hive nodes and store peer node IDs/public-key fingerprints as untrusted candidates. Discovery is not trust and does not grant access. Never trust peers automatically. Show the user the discovered node URL and node ID/fingerprint, ask them to compare it with their teammate out-of-band, and only run `hive peer trust <node-id>` after explicit approval.
+`hive setup` / `hive discover` may find local Hive nodes through active discovery or node beacons and store peer node IDs/public-key fingerprints as untrusted candidates. Discovery is not trust and does not grant access. Never trust peers automatically. Show the user the discovered node URL and node ID/fingerprint, ask them to compare it with their teammate out-of-band, and only run `hive peer trust <node-id>` after explicit approval.
 
 ### Register that Hive is available
 

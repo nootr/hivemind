@@ -274,6 +274,21 @@ impl SqliteNodeStateStore {
         Ok(())
     }
 
+    pub fn upsert_peer_candidate(&self, peer: &PeerRecord) -> NodeStateStoreResult<()> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| NodeStateStoreError::LockPoisoned)?;
+        connection.execute(
+            "INSERT INTO peers (node_id, node_url, trusted)
+             VALUES (?1, ?2, 0)
+             ON CONFLICT(node_id) DO UPDATE SET
+                node_url = excluded.node_url",
+            params![peer.node_id, peer.node_url],
+        )?;
+        Ok(())
+    }
+
     pub fn record_audit_event(
         &self,
         created_at_ms: u64,
@@ -633,6 +648,36 @@ mod tests {
         assert_eq!(
             store.consume_invite("INVITE", 1000).unwrap(),
             ConsumedInvite::NotFound
+        );
+    }
+
+    #[test]
+    fn peer_candidates_preserve_existing_trust() {
+        let store = SqliteNodeStateStore::in_memory().unwrap();
+        let node_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        store
+            .upsert_peer(&PeerRecord {
+                node_url: "https://old-node.internal".to_owned(),
+                node_id: node_id.to_owned(),
+                trusted: true,
+            })
+            .unwrap();
+
+        store
+            .upsert_peer_candidate(&PeerRecord {
+                node_url: "https://new-node.internal".to_owned(),
+                node_id: node_id.to_owned(),
+                trusted: false,
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.peer_summaries(true).unwrap(),
+            vec![PeerSummary {
+                node_url: "https://new-node.internal".to_owned(),
+                node_id: node_id.to_owned(),
+                trusted: true,
+            }]
         );
     }
 

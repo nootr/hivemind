@@ -62,7 +62,7 @@ For guided local setup, run:
 hive setup
 ```
 
-`hive setup` checks local CLI config, runs discovery, stores discovered nodes as untrusted peer candidates when a config exists, and prints explicit trust/sync next steps. Discovery is an airdrop-style convenience for changing local IPs. It is not trust and does not grant access; agents must ask the user before trusting a discovered node.
+`hive setup` checks local CLI config, runs discovery, stores discovered nodes as untrusted peer candidates when a config exists, and prints explicit trust/sync next steps. Discovery is an airdrop-style convenience for changing local IPs. Nodes answer active discovery queries and also beacon their node URL + node ID on the local discovery UDP port every 5 seconds. Discovery is still not trust and does not grant access; agents must ask the user before trusting a discovered node.
 
 Show share guidance for the configured node:
 
