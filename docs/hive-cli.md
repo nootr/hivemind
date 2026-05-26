@@ -4,7 +4,7 @@
 
 The CLI talks to a team-owned `hivemind-node` HTTP API. The node may run on your machine, on a private team server, or behind an internal gateway. The CLI does not start or manage the node yet.
 
-Status: alpha/local team prototype. Do not use as production access control until token, invite and peer state are persistent and revocable.
+Status: alpha/local team prototype. Client tokens, invites and peers are persisted in node SQLite state, but production access control still needs revocation, expiry/scopes, audit logs and deployment hardening.
 
 ## Configuration
 

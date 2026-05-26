@@ -160,7 +160,7 @@ objects/<prefix>/<object_id>.cbor
 chunks/<prefix>/<chunk_id>
 ```
 
-SQLite stores local metadata and indexes:
+SQLite stores local metadata and indexes in `metadata.sqlite3`:
 
 - objects
 - chunks
@@ -168,7 +168,15 @@ SQLite stores local metadata and indexes:
 - tags
 - object_references
 
-Filesystem content is the canonical truth. SQLite is an index that can be rebuilt from content when needed.
+Filesystem content is the canonical memory truth. `metadata.sqlite3` is an index that can be rebuilt from content when needed.
+
+Node control-plane state is stored separately in `state.sqlite3`:
+
+- generated client tokens
+- invite codes, expiry and remaining uses
+- peer node URLs, node IDs/public-key fingerprints and trust flags
+
+`state.sqlite3` is security-relevant operational state and must be backed up, protected and migrated carefully.
 
 ## 8. HTTP API
 
@@ -244,7 +252,7 @@ Running your own node?
   hive share
 ```
 
-`hive discover` uses UDP broadcast as an airdrop-style convenience for local IP changes. Discovery only returns candidate node URLs; it does not grant access and does not imply trust.
+`hive discover` uses UDP broadcast as an airdrop-style convenience for local IP changes. Discovery only returns candidate node URLs and node IDs/public-key fingerprints; it does not grant access and does not imply trust.
 
 `hive init` writes local CLI config. `hive share` shows whether the configured node URL is local-only or shareable. For reachable nodes it asks `POST /v1/invites` for a short-lived, limited-use invite and prints a `hive join ...` command.
 
@@ -307,7 +315,6 @@ This implementation is an alpha/local team prototype, not production-ready.
 
 Production blockers:
 
-- Persist client tokens, invite state, peer registry and trust decisions beyond process lifetime.
 - Add client-token expiry, revocation and narrower scopes.
 - Add audit logs for invite creation, join exchanges and trust changes.
 - Add a clear node public-key/fingerprint confirmation UX before trust.
@@ -319,11 +326,10 @@ Production blockers:
 
 ## 14. Near-term production path
 
-1. Persist node peer registry, invite state and client tokens beyond process lifetime.
-2. Add client-token revocation, expiry and narrower scopes.
-3. Add trusted team peer sync.
-4. Package the node and CLI for local/team installation.
-5. Add better search beyond exact tags.
-6. Add update/supersede/tombstone UX for memory hygiene.
-7. Add team/workspace configuration.
-8. Add admin docs for private deployment, backups and migrations.
+1. Add client-token revocation, expiry and narrower scopes.
+2. Add trusted team peer sync.
+3. Package the node and CLI for local/team installation.
+4. Add better search beyond exact tags.
+5. Add update/supersede/tombstone UX for memory hygiene.
+6. Add team/workspace configuration.
+7. Add admin docs for private deployment, backups and migrations.

@@ -29,7 +29,8 @@ On first start, the node creates:
 
 - `./data/api.token` — bearer token for `/v1/*`
 - `./data/agent.ed25519` — local agent signing seed
-- `./data/metadata.sqlite3` — local metadata index
+- `./data/metadata.sqlite3` — local memory metadata index
+- `./data/state.sqlite3` — client token, invite and peer/trust state
 - content-addressed object/chunk files under `./data`
 
 `/health` is unauthenticated. `/v1/*` requires bearer auth.

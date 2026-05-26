@@ -15,15 +15,14 @@ use hivemind_adapters::{
 use hivemind_app::{AppResult, ClockPort, IdentityPort, PublishObject, PublishObjectInput};
 use hivemind_core::{ChunkId, ObjectEnvelope, ObjectId, ObjectKind, Payload};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
+
+use crate::state::{ConsumedInvite, NodeStateStoreError, SqliteNodeStateStore};
 
 #[derive(Clone, Debug)]
 pub struct ApiConfig {
     pub admin_token: String,
-    pub client_tokens: Arc<Mutex<HashSet<String>>>,
+    pub state_store: Arc<SqliteNodeStateStore>,
 }
 
 #[derive(Clone)]
@@ -33,12 +32,7 @@ pub struct AppState {
     pub content_store: Arc<FsContentStore>,
     pub metadata_store: Arc<SqliteMetadataStore>,
     pub config: ApiConfig,
-    pub invites: InviteStore,
-    pub peers: PeerStore,
 }
-
-pub type InviteStore = Arc<Mutex<HashMap<String, InviteRecord>>>;
-pub type PeerStore = Arc<Mutex<HashMap<String, PeerRecord>>>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InviteRecord {
@@ -464,11 +458,10 @@ fn has_client_auth(config: &ApiConfig, headers: &HeaderMap) -> Result<bool, ApiE
     let Some(token) = bearer_token(headers) else {
         return Ok(false);
     };
-    Ok(config
-        .client_tokens
-        .lock()
-        .map_err(|_| ApiError::App("client token store lock poisoned".to_owned()))?
-        .contains(token))
+    config
+        .state_store
+        .has_client_token(token)
+        .map_err(state_error)
 }
 
 async fn get_peers(State(state): State<AppState>) -> Result<Json<PeerListResponse>, ApiError> {
@@ -489,10 +482,10 @@ async fn upsert_peer(
         trusted: request.trusted,
     };
     state
-        .peers
-        .lock()
-        .map_err(|_| ApiError::App("peer store lock poisoned".to_owned()))?
-        .insert(node_url, peer.clone());
+        .config
+        .state_store
+        .upsert_peer(&peer)
+        .map_err(state_error)?;
 
     Ok(Json(UpsertPeerResponse {
         peer: PeerSummary {
@@ -522,18 +515,18 @@ async fn create_invite(
         percent_encode_query_value(&invite_code)
     );
 
-    let mut invites = state
-        .invites
-        .lock()
-        .map_err(|_| ApiError::App("invite store lock poisoned".to_owned()))?;
-    invites.insert(
-        invite_code.clone(),
-        InviteRecord {
-            node_url: node_url.clone(),
-            expires_at_ms,
-            uses_remaining,
-        },
-    );
+    state
+        .config
+        .state_store
+        .insert_invite(
+            &invite_code,
+            &InviteRecord {
+                node_url: node_url.clone(),
+                expires_at_ms,
+                uses_remaining,
+            },
+        )
+        .map_err(state_error)?;
 
     Ok(Json(CreateInviteResponse {
         invite_code,
@@ -550,33 +543,19 @@ async fn join_invite(
 ) -> Result<Json<JoinInviteResponse>, ApiError> {
     let invite_code = normalize_invite_code(&request.invite_code)?;
     let now_ms = state.clock.now_ms().await.map_err(app_error)?;
-    let mut invites = state
-        .invites
-        .lock()
-        .map_err(|_| ApiError::App("invite store lock poisoned".to_owned()))?;
-    let Some(record) = invites.get_mut(&invite_code) else {
-        return Err(ApiError::InviteNotFound);
+    let api_token = generate_token()?;
+    let node_url = match state
+        .config
+        .state_store
+        .exchange_invite_for_client_token(&invite_code, now_ms, &api_token)
+        .map_err(state_error)?
+    {
+        ConsumedInvite::Active { node_url } => node_url,
+        ConsumedInvite::Expired => return Err(ApiError::InviteExpired),
+        ConsumedInvite::NotFound => return Err(ApiError::InviteNotFound),
     };
 
-    if record.expires_at_ms <= now_ms {
-        invites.remove(&invite_code);
-        return Err(ApiError::InviteExpired);
-    }
-
-    let node_url = record.node_url.clone();
-    record.uses_remaining = record.uses_remaining.saturating_sub(1);
-    if record.uses_remaining == 0 {
-        invites.remove(&invite_code);
-    }
-
     let peers = peer_summaries(&state, false)?;
-    let api_token = generate_token()?;
-    state
-        .config
-        .client_tokens
-        .lock()
-        .map_err(|_| ApiError::App("client token store lock poisoned".to_owned()))?
-        .insert(api_token.clone());
 
     Ok(Json(JoinInviteResponse {
         node_url,
@@ -1112,19 +1091,11 @@ fn validate_node_id(node_id: String) -> Result<String, ApiError> {
 }
 
 fn peer_summaries(state: &AppState, include_trust: bool) -> Result<Vec<PeerSummary>, ApiError> {
-    let mut peers = state
-        .peers
-        .lock()
-        .map_err(|_| ApiError::App("peer store lock poisoned".to_owned()))?
-        .values()
-        .map(|peer| PeerSummary {
-            node_url: peer.node_url.clone(),
-            node_id: peer.node_id.clone(),
-            trusted: include_trust && peer.trusted,
-        })
-        .collect::<Vec<_>>();
-    peers.sort_by(|left, right| left.node_url.cmp(&right.node_url));
-    Ok(peers)
+    state
+        .config
+        .state_store
+        .peer_summaries(include_trust)
+        .map_err(state_error)
 }
 
 fn normalize_invite_code(invite_code: &str) -> Result<String, ApiError> {
@@ -1175,6 +1146,10 @@ fn app_error(err: hivemind_app::AppError) -> ApiError {
     ApiError::App(err.to_string())
 }
 
+fn state_error(err: NodeStateStoreError) -> ApiError {
+    ApiError::App(err.to_string())
+}
+
 #[derive(Clone)]
 pub struct SystemClock;
 
@@ -1215,6 +1190,16 @@ mod tests {
     }
 
     fn test_app(tempdir: &tempfile::TempDir) -> TestApp {
+        test_app_with_state_store(
+            tempdir,
+            Arc::new(SqliteNodeStateStore::in_memory().unwrap()),
+        )
+    }
+
+    fn test_app_with_state_store(
+        tempdir: &tempfile::TempDir,
+        state_store: Arc<SqliteNodeStateStore>,
+    ) -> TestApp {
         let content_store = Arc::new(FsContentStore::new(tempdir.path()));
         let metadata_store = Arc::new(SqliteMetadataStore::in_memory().unwrap());
         let state = AppState {
@@ -1224,10 +1209,8 @@ mod tests {
             metadata_store: Arc::clone(&metadata_store),
             config: ApiConfig {
                 admin_token: "secret".to_owned(),
-                client_tokens: Arc::new(Mutex::new(HashSet::new())),
+                state_store,
             },
-            invites: Arc::new(Mutex::new(HashMap::new())),
-            peers: Arc::new(Mutex::new(HashMap::new())),
         };
         TestApp {
             router: app(state),
@@ -1466,6 +1449,150 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn joined_client_token_persists_after_state_reload() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_path = tempdir.path().join("state.sqlite3");
+        let router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+
+        let response = router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/invites",
+                serde_json::json!({"node_url": "https://hive.example.internal"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let invite: CreateInviteResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let response = router
+            .oneshot(public_json_request(
+                "/v1/join",
+                serde_json::json!({"invite_code": invite.invite_code}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let joined: JoinInviteResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let reloaded_router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+        let response = reloaded_router
+            .oneshot(authorized_get_request_with_token(
+                "/v1/tags/unknown",
+                &joined.api_token,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn invite_use_persists_after_state_reload() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_path = tempdir.path().join("state.sqlite3");
+        let router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+
+        let response = router
+            .oneshot(authorized_json_request(
+                "/v1/invites",
+                serde_json::json!({"node_url": "https://hive.example.internal", "uses": 1}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let invite: CreateInviteResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let reloaded_router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+        let response = reloaded_router
+            .clone()
+            .oneshot(public_json_request(
+                "/v1/join",
+                serde_json::json!({"invite_code": invite.invite_code.clone()}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let reloaded_router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+        let response = reloaded_router
+            .oneshot(public_json_request(
+                "/v1/join",
+                serde_json::json!({"invite_code": invite.invite_code}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn peers_persist_after_state_reload() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_path = tempdir.path().join("state.sqlite3");
+        let router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+
+        let response = router
+            .oneshot(authorized_json_request(
+                "/v1/peers",
+                serde_json::json!({"node_url": "https://node-b.internal", "node_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "trusted": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let reloaded_router = test_app_with_state_store(
+            &tempdir,
+            Arc::new(SqliteNodeStateStore::open(&state_path).unwrap()),
+        )
+        .router;
+        let response = reloaded_router
+            .oneshot(authorized_get_request("/v1/peers"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: PeerListResponse = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            body.peers,
+            vec![PeerSummary {
+                node_url: "https://node-b.internal".to_owned(),
+                node_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                trusted: true,
+            }]
+        );
     }
 
     #[tokio::test]

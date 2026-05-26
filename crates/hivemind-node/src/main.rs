@@ -1,13 +1,13 @@
 use hivemind_adapters::{fs::FsContentStore, sqlite::SqliteMetadataStore};
 use hivemind_node::{
-    app, load_or_create_token, ApiConfig, AppState, FileIdentity, NodeConfig, SystemClock,
+    app, load_or_create_token, ApiConfig, AppState, FileIdentity, NodeConfig, SqliteNodeStateStore,
+    SystemClock,
 };
 use std::{
-    collections::{HashMap, HashSet},
     env,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 const DISCOVERY_PORT: u16 = 7748;
@@ -33,6 +33,9 @@ enum MainError {
 
     #[error("sqlite error: {0}")]
     Sqlite(#[from] hivemind_adapters::sqlite::SqliteStoreError),
+
+    #[error("state store error: {0}")]
+    StateStore(#[from] hivemind_node::NodeStateStoreError),
 }
 
 #[tokio::main]
@@ -49,6 +52,9 @@ async fn run(config: NodeConfig) -> Result<(), MainError> {
     let node_id = identity.agent_id().to_string();
     let content_store = FsContentStore::new(&config.data.dir);
     let metadata_store = SqliteMetadataStore::open(config.data.dir.join("metadata.sqlite3"))?;
+    let state_store = Arc::new(SqliteNodeStateStore::open(
+        config.data.dir.join("state.sqlite3"),
+    )?);
     let bind_addr = config.api.bind_addr;
     let public_url = config.api.public_url.clone();
 
@@ -59,10 +65,8 @@ async fn run(config: NodeConfig) -> Result<(), MainError> {
         metadata_store: Arc::new(metadata_store),
         config: ApiConfig {
             admin_token: token,
-            client_tokens: Arc::new(Mutex::new(HashSet::new())),
+            state_store,
         },
-        invites: Arc::new(Mutex::new(HashMap::new())),
-        peers: Arc::new(Mutex::new(HashMap::new())),
     };
 
     spawn_discovery_responder(bind_addr, public_url, node_id);
