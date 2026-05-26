@@ -301,13 +301,29 @@ Rules:
 
 These can be explored separately later if the team-memory product proves useful, but they are not part of the production path for v1.
 
-## 13. Near-term production path
+## 13. Production readiness
 
-1. Package the node and CLI for local/team installation.
-2. Add better search beyond exact tags.
-3. Add update/supersede/tombstone UX for memory hygiene.
-4. Add team/workspace configuration.
-5. Persist node peer registry, invite state and client tokens beyond process lifetime.
-6. Add client-token revocation and narrower scopes.
-7. Add trusted team peer sync.
-8. Add admin docs for private deployment and backups.
+This implementation is an alpha/local team prototype, not production-ready.
+
+Production blockers:
+
+- Persist client tokens, invite state, peer registry and trust decisions beyond process lifetime.
+- Add client-token expiry, revocation and narrower scopes.
+- Add audit logs for invite creation, join exchanges and trust changes.
+- Add a clear node public-key/fingerprint confirmation UX before trust.
+- Harden UDP discovery with rate limits, validation and deployment guidance for VPNs/subnets.
+- Implement trusted peer sync; current two-node flow is still manual transfer.
+- Add packaging/install flows for node and CLI.
+- Add backup/restore docs and config/state migration/versioning.
+- Add observability and private deployment guidance, including TLS/proxy recommendations.
+
+## 14. Near-term production path
+
+1. Persist node peer registry, invite state and client tokens beyond process lifetime.
+2. Add client-token revocation, expiry and narrower scopes.
+3. Add trusted team peer sync.
+4. Package the node and CLI for local/team installation.
+5. Add better search beyond exact tags.
+6. Add update/supersede/tombstone UX for memory hygiene.
+7. Add team/workspace configuration.
+8. Add admin docs for private deployment, backups and migrations.

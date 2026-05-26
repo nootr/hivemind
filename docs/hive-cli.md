@@ -4,6 +4,8 @@
 
 The CLI talks to a team-owned `hivemind-node` HTTP API. The node may run on your machine, on a private team server, or behind an internal gateway. The CLI does not start or manage the node yet.
 
+Status: alpha/local team prototype. Do not use as production access control until token, invite and peer state are persistent and revocable.
+
 ## Configuration
 
 Configure the CLI once with a node URL and token file:

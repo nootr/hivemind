@@ -8,7 +8,9 @@ HIVEMIND is designed for small team-owned nodes first. A team can run a local or
 
 ## Status
 
-Early implementation. The current milestone focuses on team memory primitives: a local HTTP node, content-addressed objects, signed provenance, chunk transfer, exact tag discovery, a `hive` CLI and a Hive Agent Skill.
+Early alpha implementation. The current milestone focuses on team memory primitives: a local HTTP node, content-addressed objects, signed provenance, chunk transfer, exact tag discovery, a `hive` CLI and a Hive Agent Skill.
+
+Not production-ready yet. Current auth, invite and peer state are prototype-grade; see [production readiness](docs/architecture-v1.md#13-production-readiness) for blockers.
 
 ## Hive CLI
 
