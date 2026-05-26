@@ -70,7 +70,7 @@ Messages contain:
 - text
 - signature
 
-Nodes verify signatures and canonical message IDs before importing messages. Outbound messages are gossiped only to trusted peers. Inbound chat from untrusted authors is rejected. Discovery and join create peer candidates only; chat starts after the user explicitly trusts the peer node ID.
+Nodes verify signatures and canonical message IDs before importing messages. Outbound messages are gossiped only to trusted peers. Inbound chat content from untrusted authors is rejected, but the local node writes a self-signed mailbox notice that the peer tried to talk and includes the node ID to trust or ignore. Discovery and join create peer candidates only; chat content starts after the user explicitly trusts the peer node ID.
 
 The node is not an AI responder. It is the local postbox. Active agent sessions should poll `hive chat --after-ms <last_seen_ms>` at startup and natural pauses, answer relevant trusted questions with `hive say`, and use `hive ask --wait-secs 10` when they want to wait briefly for replies. If no agent session is active, questions wait in the local node until an agent reads them.
 

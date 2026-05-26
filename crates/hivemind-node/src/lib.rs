@@ -8,7 +8,7 @@ use axum::{
 use hivemind_core::{valid_node_id, ChatMessage, NodeKey, PeerInfo, PeerRecord};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket},
@@ -83,6 +83,7 @@ pub struct AppState {
 struct Store {
     peers: Mutex<BTreeMap<String, PeerRecord>>,
     messages: Mutex<BTreeMap<String, ChatMessage>>,
+    untrusted_notices: Mutex<BTreeSet<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,6 +256,7 @@ async fn import_message(
     if message.author_node_id != state.key.node_id()
         && !trusted_author(&state, &message.author_node_id)
     {
+        store_untrusted_author_notice(&state, &message.author_node_id)?;
         return Err(ApiError::Forbidden);
     }
     store_message(&state, message.clone())?;
@@ -286,6 +288,39 @@ fn store_message(state: &AppState, message: ChatMessage) -> Result<(), ApiError>
         .map_err(|_| ApiError::Internal("message lock".to_owned()))?
         .insert(message.id.clone(), message);
     Ok(())
+}
+
+fn store_untrusted_author_notice(state: &AppState, author_node_id: &str) -> Result<(), ApiError> {
+    let inserted = state
+        .store
+        .untrusted_notices
+        .lock()
+        .map_err(|_| ApiError::Internal("notice lock".to_owned()))?
+        .insert(author_node_id.to_owned());
+    if !inserted {
+        return Ok(());
+    }
+
+    let known_peer = state
+        .store
+        .peers
+        .lock()
+        .map_err(|_| ApiError::Internal("peer lock".to_owned()))?
+        .get(author_node_id)
+        .cloned();
+    let text = if let Some(peer) = known_peer {
+        format!(
+            "Untrusted peer {} ({}) tried to send a chat message. The message was ignored. Verify the node ID out-of-band; if you trust it, run: hive peer trust {}",
+            short_node_id(author_node_id), peer.node_url, author_node_id
+        )
+    } else {
+        format!(
+            "Unknown untrusted node {} tried to send a chat message. The message was ignored. Join and verify the peer out-of-band before trusting node ID {}.",
+            short_node_id(author_node_id), author_node_id
+        )
+    };
+    let notice = state.key.sign_chat("default", now_ms(), &text);
+    store_message(state, notice)
 }
 
 fn spawn_discovery(bind_addr: SocketAddr, public_url: Option<String>, state: AppState) {
@@ -483,6 +518,10 @@ fn outbound_ip_for(peer: SocketAddr) -> Option<IpAddr> {
 
 fn valid_node_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
+}
+
+fn short_node_id(node_id: &str) -> String {
+    node_id.chars().take(8).collect()
 }
 
 fn now_ms() -> u64 {
@@ -718,11 +757,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_rejects_untrusted_author() {
+    async fn import_rejects_untrusted_author_and_stores_notice() {
         let state = test_state();
         let author = NodeKey::from_seed_hex(&"02".repeat(32)).unwrap();
-        let message = author.sign_chat("default", 123, "hello");
-        let response = app(state)
+        let message = author.sign_chat("default", 123, "secret text should not be copied");
+        let response = app(state.clone())
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
@@ -736,6 +775,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let messages = state.store.messages.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        let notice = messages.values().next().unwrap();
+        assert!(notice.text.contains("tried to send a chat message"));
+        assert!(notice.text.contains(&author.node_id()));
+        assert!(!notice.text.contains("secret text should not be copied"));
+        notice.verify().unwrap();
     }
 
     #[tokio::test]
