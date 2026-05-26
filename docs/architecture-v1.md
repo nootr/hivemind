@@ -196,6 +196,7 @@ GET  /v1/audit
 POST /v1/invites
 GET  /v1/peers
 POST /v1/peers
+POST /v1/sync/pull
 POST /v1/client-tokens/{token}/revoke
 GET  /v1/tags/{tag}
 ```
@@ -265,15 +266,26 @@ The join response can include known peer node URLs and node IDs/public-key finge
 
 ## 10. Team peer sync roadmap
 
-The current two-node demo manually performs the future sync protocol:
+The current implementation supports an admin-triggered pull sync from manually trusted peers:
+
+```text
+POST /v1/sync/pull
+{
+  "peer_node_id": "<trusted-node-id>",
+  "peer_api_token": "<peer-read-token>",
+  "tag": "<tag-to-sync>"
+}
+```
+
+The target node only syncs from peers that are already trusted locally by node ID/public-key fingerprint. The peer API token is supplied for the sync request and is not stored. The sync currently pulls objects by exact tag, fetches verified envelopes and missing chunks from the peer, verifies content locally and indexes imported objects.
+
+The two-node E2E test still demonstrates the lower-level transfer protocol manually:
 
 1. source exports a signed envelope
 2. target plans import and reports missing chunks
 3. target retrieves chunks from source
 4. target imports the envelope
 5. target indexes the object locally
-
-Future peer sync should automate this between trusted team nodes.
 
 Recommended v1 peer-sync shape:
 
@@ -320,14 +332,14 @@ Production blockers:
 
 - Add a clear node public-key/fingerprint confirmation UX before trust.
 - Harden UDP discovery with rate limits, validation and deployment guidance for VPNs/subnets.
-- Implement trusted peer sync; current two-node flow is still manual transfer.
+- Add scheduled/background trusted peer sync; current sync is admin-triggered by exact tag.
 - Add packaging/install flows for node and CLI.
 - Add backup/restore docs and config/state migration/versioning.
 - Add observability and private deployment guidance, including TLS/proxy recommendations.
 
 ## 14. Near-term production path
 
-1. Add trusted team peer sync.
+1. Add scheduled/background trusted peer sync.
 2. Package the node and CLI for local/team installation.
 3. Add better search beyond exact tags.
 4. Add update/supersede/tombstone UX for memory hygiene.

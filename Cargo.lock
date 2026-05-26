@@ -700,6 +700,7 @@ dependencies = [
  "hivemind-app",
  "hivemind-core",
  "minicbor",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

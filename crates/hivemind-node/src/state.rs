@@ -318,6 +318,32 @@ impl SqliteNodeStateStore {
         Ok(events)
     }
 
+    pub fn trusted_peer_by_node_id(
+        &self,
+        node_id: &str,
+    ) -> NodeStateStoreResult<Option<PeerRecord>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| NodeStateStoreError::LockPoisoned)?;
+        let peer = connection
+            .query_row(
+                "SELECT node_url, node_id, trusted
+                 FROM peers
+                 WHERE node_id = ?1 AND trusted = 1",
+                params![node_id],
+                |row| {
+                    Ok(PeerRecord {
+                        node_url: row.get(0)?,
+                        node_id: row.get(1)?,
+                        trusted: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(peer)
+    }
+
     pub fn peer_summaries(&self, include_trust: bool) -> NodeStateStoreResult<Vec<PeerSummary>> {
         let connection = self
             .connection
@@ -607,6 +633,36 @@ mod tests {
         assert_eq!(
             store.consume_invite("INVITE", 1000).unwrap(),
             ConsumedInvite::NotFound
+        );
+    }
+
+    #[test]
+    fn trusted_peer_lookup_requires_trust() {
+        let store = SqliteNodeStateStore::in_memory().unwrap();
+        let node_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        store
+            .upsert_peer(&PeerRecord {
+                node_url: "https://node-a.internal".to_owned(),
+                node_id: node_id.to_owned(),
+                trusted: false,
+            })
+            .unwrap();
+        assert_eq!(store.trusted_peer_by_node_id(node_id).unwrap(), None);
+
+        store
+            .upsert_peer(&PeerRecord {
+                node_url: "https://node-a.internal".to_owned(),
+                node_id: node_id.to_owned(),
+                trusted: true,
+            })
+            .unwrap();
+        assert_eq!(
+            store.trusted_peer_by_node_id(node_id).unwrap(),
+            Some(PeerRecord {
+                node_url: "https://node-a.internal".to_owned(),
+                node_id: node_id.to_owned(),
+                trusted: true,
+            })
         );
     }
 

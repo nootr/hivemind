@@ -109,6 +109,23 @@ pub struct PutChunkRequest {
     pub bytes_base64: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SyncPullRequest {
+    pub peer_node_id: String,
+    pub peer_api_token: String,
+    pub tag: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct SyncPullResponse {
+    pub peer_node_id: String,
+    pub tag: String,
+    pub scanned_objects: u32,
+    pub imported_objects: u32,
+    pub skipped_objects: u32,
+    pub imported_chunks: u32,
+}
+
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct PutChunkResponse {
     pub chunk_id: String,
@@ -302,6 +319,12 @@ pub enum ApiError {
     #[error("invalid client token")]
     InvalidClientToken,
 
+    #[error("peer is not trusted")]
+    PeerNotTrusted,
+
+    #[error("sync failed: {0}")]
+    Sync(String),
+
     #[error("invite not found")]
     InviteNotFound,
 
@@ -342,6 +365,7 @@ impl ApiError {
             | ApiError::InvalidInvite
             | ApiError::InvalidClientToken
             | ApiError::InvalidBase64 => StatusCode::BAD_REQUEST,
+            ApiError::PeerNotTrusted => StatusCode::FORBIDDEN,
             ApiError::MissingObjectChunks { .. } | ApiError::ContentConflict => {
                 StatusCode::CONFLICT
             }
@@ -349,6 +373,7 @@ impl ApiError {
                 StatusCode::NOT_FOUND
             }
             ApiError::InviteExpired => StatusCode::GONE,
+            ApiError::Sync(_) => StatusCode::BAD_GATEWAY,
             ApiError::App(_) | ApiError::Metadata(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -363,6 +388,8 @@ impl ApiError {
             ApiError::InvalidObjectEnvelope => "invalid_object_envelope",
             ApiError::InvalidInvite => "invalid_invite",
             ApiError::InvalidClientToken => "invalid_client_token",
+            ApiError::PeerNotTrusted => "peer_not_trusted",
+            ApiError::Sync(_) => "sync_failed",
             ApiError::InviteNotFound => "invite_not_found",
             ApiError::InviteExpired => "invite_expired",
             ApiError::MissingObjectChunks { .. } => "missing_object_chunks",
@@ -473,6 +500,7 @@ pub fn app(state: AppState) -> Router {
 
     let admin_routes = Router::new()
         .route("/v1/audit", get(get_audit_log))
+        .route("/v1/sync/pull", post(sync_pull))
         .route("/v1/invites", post(create_invite))
         .route("/v1/peers", get(get_peers).post(upsert_peer))
         .route(
@@ -577,6 +605,107 @@ async fn get_audit_log(
         .audit_events(query.limit.unwrap_or(100))
         .map_err(state_error)?;
     Ok(Json(AuditLogResponse { events }))
+}
+
+async fn sync_pull(
+    State(state): State<AppState>,
+    Json(request): Json<SyncPullRequest>,
+) -> Result<Json<SyncPullResponse>, ApiError> {
+    let peer_node_id = validate_node_id(request.peer_node_id)?;
+    let peer_api_token = validate_peer_api_token(request.peer_api_token)?;
+    let tag = validate_sync_tag(request.tag)?;
+    let peer = state
+        .config
+        .state_store
+        .trusted_peer_by_node_id(&peer_node_id)
+        .map_err(state_error)?
+        .ok_or(ApiError::PeerNotTrusted)?;
+
+    let client = reqwest::Client::new();
+    let remote_tag = get_remote_json::<TagLookupResponse>(
+        &client,
+        &peer.node_url,
+        &format!("/v1/tags/{}", percent_encode_path_segment(&tag)),
+        &peer_api_token,
+    )
+    .await?;
+
+    let mut imported_objects = 0_u32;
+    let mut skipped_objects = 0_u32;
+    let mut imported_chunks = 0_u32;
+
+    for object in &remote_tag.objects {
+        let object_id = object
+            .object_id
+            .parse::<ObjectId>()
+            .map_err(|_| ApiError::Sync("peer returned invalid object id".to_owned()))?;
+        if state
+            .content_store
+            .has_object(object_id)
+            .await
+            .map_err(|err| ApiError::App(err.to_string()))?
+        {
+            skipped_objects += 1;
+            continue;
+        }
+
+        let envelope_response = get_remote_json::<GetObjectEnvelopeResponse>(
+            &client,
+            &peer.node_url,
+            &format!("/v1/objects/{}/envelope", object.object_id),
+            &peer_api_token,
+        )
+        .await?;
+        let envelope = parse_verified_envelope_base64(&envelope_response.envelope_cbor_base64)?;
+        let missing_chunk_ids =
+            missing_chunk_ids_for_payload(&state.content_store, &envelope.body.payload).await?;
+
+        for chunk_id in missing_chunk_ids {
+            let chunk_response = get_remote_json::<GetChunkResponse>(
+                &client,
+                &peer.node_url,
+                &format!("/v1/chunks/{chunk_id}"),
+                &peer_api_token,
+            )
+            .await?;
+            let bytes = STANDARD
+                .decode(chunk_response.bytes_base64.as_bytes())
+                .map_err(|_| ApiError::Sync("peer returned invalid chunk base64".to_owned()))?;
+            let parsed_chunk_id = chunk_id
+                .parse::<ChunkId>()
+                .map_err(|_| ApiError::Sync("peer returned invalid chunk id".to_owned()))?;
+            state
+                .content_store
+                .put_chunk_bytes(parsed_chunk_id, &bytes)
+                .await
+                .map_err(fs_write_error)?;
+            imported_chunks += 1;
+        }
+
+        import_verified_envelope(&state, envelope).await?;
+        imported_objects += 1;
+    }
+
+    let now_ms = state.clock.now_ms().await.map_err(app_error)?;
+    record_audit_event(
+        &state,
+        now_ms,
+        "sync_pull_completed",
+        Some(&peer_node_id),
+        &format!(
+            "tag={tag} scanned={} imported_objects={imported_objects} skipped_objects={skipped_objects} imported_chunks={imported_chunks}",
+            remote_tag.objects.len()
+        ),
+    )?;
+
+    Ok(Json(SyncPullResponse {
+        peer_node_id,
+        tag,
+        scanned_objects: remote_tag.objects.len() as u32,
+        imported_objects,
+        skipped_objects,
+        imported_chunks,
+    }))
 }
 
 async fn revoke_client_token(
@@ -787,28 +916,12 @@ async fn import_object_envelope(
     Json(request): Json<ImportObjectEnvelopeRequest>,
 ) -> Result<Json<ImportObjectEnvelopeResponse>, ApiError> {
     let envelope = parse_verified_envelope_base64(&request.envelope_cbor_base64)?;
-    ensure_chunks_available(&state.content_store, &envelope.body.payload).await?;
-
-    state
-        .content_store
-        .put_object_envelope(&envelope)
-        .await
-        .map_err(fs_write_error)?;
-    let chunks = stored_chunks_from_payload(&state.content_store, &envelope.body.payload);
-    let received_at_ms = state.clock.now_ms().await.map_err(app_error)?;
-    state
-        .metadata_store
-        .record_object(
-            &envelope,
-            state.content_store.object_path(envelope.object_id),
-            &chunks,
-            received_at_ms,
-        )
-        .map_err(|err| ApiError::Metadata(err.to_string()))?;
+    let object_id = envelope.object_id.to_string();
+    let chunk_ids = import_verified_envelope(&state, envelope).await?;
 
     Ok(Json(ImportObjectEnvelopeResponse {
-        object_id: envelope.object_id.to_string(),
-        chunk_ids: chunk_ids_from_payload(&envelope.body.payload),
+        object_id,
+        chunk_ids,
     }))
 }
 
@@ -1262,6 +1375,22 @@ fn validate_client_token(token: String) -> Result<String, ApiError> {
     Ok(token)
 }
 
+fn validate_peer_api_token(token: String) -> Result<String, ApiError> {
+    let token = token.trim().to_owned();
+    if token.is_empty() || token.chars().any(char::is_whitespace) {
+        return Err(ApiError::InvalidClientToken);
+    }
+    Ok(token)
+}
+
+fn validate_sync_tag(tag: String) -> Result<String, ApiError> {
+    let tag = tag.trim().to_owned();
+    if tag.is_empty() || tag.len() > 128 || tag.chars().any(char::is_control) {
+        return Err(ApiError::InvalidInvite);
+    }
+    Ok(tag)
+}
+
 fn peer_summaries(state: &AppState, include_trust: bool) -> Result<Vec<PeerSummary>, ApiError> {
     state
         .config
@@ -1301,6 +1430,10 @@ fn generate_token() -> Result<String, ApiError> {
     Ok(hex::encode(bytes))
 }
 
+fn percent_encode_path_segment(value: &str) -> String {
+    percent_encode_query_value(value)
+}
+
 fn percent_encode_query_value(value: &str) -> String {
     let mut output = String::new();
     for byte in value.bytes() {
@@ -1312,6 +1445,55 @@ fn percent_encode_query_value(value: &str) -> String {
         }
     }
     output
+}
+
+async fn import_verified_envelope(
+    state: &AppState,
+    envelope: ObjectEnvelope,
+) -> Result<Vec<String>, ApiError> {
+    ensure_chunks_available(&state.content_store, &envelope.body.payload).await?;
+
+    state
+        .content_store
+        .put_object_envelope(&envelope)
+        .await
+        .map_err(fs_write_error)?;
+    let chunks = stored_chunks_from_payload(&state.content_store, &envelope.body.payload);
+    let chunk_ids = chunk_ids_from_payload(&envelope.body.payload);
+    let received_at_ms = state.clock.now_ms().await.map_err(app_error)?;
+    state
+        .metadata_store
+        .record_object(
+            &envelope,
+            state.content_store.object_path(envelope.object_id),
+            &chunks,
+            received_at_ms,
+        )
+        .map_err(|err| ApiError::Metadata(err.to_string()))?;
+
+    Ok(chunk_ids)
+}
+
+async fn get_remote_json<T: for<'de> Deserialize<'de>>(
+    client: &reqwest::Client,
+    base_url: &str,
+    path: &str,
+    token: &str,
+) -> Result<T, ApiError> {
+    let url = format!("{}{path}", base_url.trim_end_matches('/'));
+    let response = client
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|err| ApiError::Sync(err.to_string()))?;
+    let response = response
+        .error_for_status()
+        .map_err(|err| ApiError::Sync(err.to_string()))?;
+    response
+        .json::<T>()
+        .await
+        .map_err(|err| ApiError::Sync(err.to_string()))
 }
 
 fn app_error(err: hivemind_app::AppError) -> ApiError {
@@ -1369,6 +1551,7 @@ mod tests {
         body::to_bytes,
         http::{Method, Request},
     };
+    use tokio::net::TcpListener;
     use tower::ServiceExt;
 
     #[derive(Clone)]
@@ -1548,6 +1731,103 @@ mod tests {
                 trusted: true,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn sync_pull_rejects_untrusted_peer() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let state_store = Arc::new(SqliteNodeStateStore::in_memory().unwrap());
+        state_store
+            .upsert_peer(&PeerRecord {
+                node_url: "http://127.0.0.1:9".to_owned(),
+                node_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                trusted: false,
+            })
+            .unwrap();
+        let router = test_app_with_state_store(&tempdir, state_store).router;
+
+        let response = router
+            .oneshot(authorized_json_request(
+                "/v1/sync/pull",
+                serde_json::json!({
+                    "peer_node_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "peer_api_token": "secret",
+                    "tag": "sync"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn sync_pull_imports_tagged_object_from_trusted_peer() {
+        let source_tempdir = tempfile::tempdir().unwrap();
+        let source_router = test_app(&source_tempdir).router;
+        let response = source_router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/objects",
+                serde_json::json!({
+                    "object_type": "fact",
+                    "mime_type": "text/plain",
+                    "payload_base64": STANDARD.encode(b"synced memory"),
+                    "tags": ["sync"]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let published: PublishObjectResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_addr = listener.local_addr().unwrap();
+        let source_server = tokio::spawn(async move {
+            axum::serve(listener, source_router).await.unwrap();
+        });
+
+        let target_tempdir = tempfile::tempdir().unwrap();
+        let target_state = Arc::new(SqliteNodeStateStore::in_memory().unwrap());
+        target_state
+            .upsert_peer(&PeerRecord {
+                node_url: format!("http://{source_addr}"),
+                node_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                trusted: true,
+            })
+            .unwrap();
+        let target_router = test_app_with_state_store(&target_tempdir, target_state).router;
+
+        let response = target_router
+            .clone()
+            .oneshot(authorized_json_request(
+                "/v1/sync/pull",
+                serde_json::json!({
+                    "peer_node_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "peer_api_token": "secret",
+                    "tag": "sync"
+                }),
+            ))
+            .await
+            .unwrap();
+        source_server.abort();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: SyncPullResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.scanned_objects, 1);
+        assert_eq!(body.imported_objects, 1);
+
+        let response = target_router
+            .oneshot(authorized_get_request(&format!(
+                "/v1/objects/{}",
+                published.object_id
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

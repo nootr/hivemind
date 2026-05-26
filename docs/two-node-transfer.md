@@ -2,6 +2,8 @@
 
 This demo runs two local HIVEMIND team nodes and transfers one chunked object from node A to node B using only verified HTTP primitives.
 
+The node also exposes admin-triggered exact-tag pull sync at `POST /v1/sync/pull`; this document keeps the lower-level transfer flow visible for debugging and verification.
+
 Flow:
 
 1. node A publishes a chunked object
@@ -27,7 +29,7 @@ Expected final output:
 two-node transfer ok: <object_id> via <n> chunks
 ```
 
-This is not automated peer sync yet. It proves the local content-transfer contract that future trusted team-node sync can automate:
+This is lower-level than `POST /v1/sync/pull`. It proves the local content-transfer contract that trusted team-node sync uses:
 
 - chunks are content-addressed and verified on import
 - envelope export includes summary metadata, signed deterministic-CBOR bytes and transfer chunk metadata

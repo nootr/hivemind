@@ -13,8 +13,9 @@ pub use api::{
     ImportObjectEnvelopeResponse, InviteRecord, JoinInviteRequest, JoinInviteResponse,
     ObjectSummary, PeerListResponse, PeerRecord, PeerSummary, PlanObjectEnvelopeImportRequest,
     PlanObjectEnvelopeImportResponse, PublishObjectRequest, PublishObjectResponse, PutChunkRequest,
-    PutChunkResponse, ReferrersResponse, RevokeClientTokenResponse, SystemClock, TagLookupResponse,
-    TransferChunk, UpsertPeerRequest, UpsertPeerResponse,
+    PutChunkResponse, ReferrersResponse, RevokeClientTokenResponse, SyncPullRequest,
+    SyncPullResponse, SystemClock, TagLookupResponse, TransferChunk, UpsertPeerRequest,
+    UpsertPeerResponse,
 };
 pub use config::{ApiFileConfig, ConfigError, DataConfig, IdentityConfig, NodeConfig};
 pub use dev_identity::DevIdentity;

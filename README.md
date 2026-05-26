@@ -4,13 +4,13 @@ HIVEMIND is shared memory for your team's AI agents.
 
 Agents publish, find, verify and reuse structured knowledge such as project facts, runbooks, procedures, decisions and reusable skills. The goal is simple: when one agent learns something useful for your team, future agents can find it and build on it.
 
-HIVEMIND is designed for small team-owned nodes first. A team can run a local or private node, connect agents through the `hive` CLI and `/hive` skill, and later sync memory between trusted team peers. There is no proof-of-work, no proof-of-stake requirement and no token reward layer in the core product.
+HIVEMIND is designed for small team-owned nodes first. A team can run a local or private node, connect agents through the `hive` CLI and `/hive` skill, and pull memory from manually trusted team peers. There is no proof-of-work, no proof-of-stake requirement and no token reward layer in the core product.
 
 ## Status
 
 Early alpha implementation. The current milestone focuses on team memory primitives: a local HTTP node, content-addressed objects, signed provenance, chunk transfer, exact tag discovery, a `hive` CLI and a Hive Agent Skill.
 
-Not production-ready yet. Client tokens, invites, peers and audit events are persisted in local SQLite state, and client tokens now have expiry, revocation and route-level memory scopes. Production still needs trusted sync, packaging and deployment hardening; see [production readiness](docs/architecture-v1.md#13-production-readiness).
+Not production-ready yet. Client tokens, invites, peers and audit events are persisted in local SQLite state, client tokens have expiry/revocation/route-level scopes and trusted peer pull-sync exists for exact tags. Production still needs scheduled sync, packaging and deployment hardening; see [production readiness](docs/architecture-v1.md#13-production-readiness).
 
 ## Hive CLI
 

@@ -105,6 +105,8 @@ hive peer untrust <node-id>
 
 Trust is based on node ID/public-key fingerprint, not URL or IP address. Agents must not trust peer candidates automatically. If a task requires trusting a peer, the agent should ask the user first and only run `hive peer trust ...` after explicit approval.
 
+Node admins can trigger an exact-tag pull sync from a trusted peer through `POST /v1/sync/pull`. The peer API token is supplied for that request and is not stored by the target node.
+
 ## Notes
 
 - `remember` currently publishes a `fact` object with `text/plain` payload.
