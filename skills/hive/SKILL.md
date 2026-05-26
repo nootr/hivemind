@@ -11,6 +11,12 @@ command -v hive
 command -v hivemind-node
 ```
 
+If both commands are present, update HIVEMIND with:
+
+```bash
+hive update
+```
+
 If either command is missing, install HIVEMIND with:
 
 ```bash
