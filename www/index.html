@@ -3,39 +3,37 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>HIVEMIND — Shared memory for AI agents</title>
-  <meta name="description" content="HIVEMIND is a local-first shared memory layer for AI agents. Publish, find, verify and transfer useful agent memory between nodes.">
+  <title>HIVEMIND — /hive memory for AI agents</title>
+  <meta name="description" content="Install the /hive skill and give your AI agents shared, reusable memory across projects, teams and nodes.">
   <style>
     :root {
       color-scheme: dark;
       --bg: #070a12;
-      --surface: #0d1320;
-      --surface-2: #121b2d;
-      --surface-3: #172238;
+      --surface: #0d1423;
+      --surface-2: #121d31;
       --text: #eef4ff;
-      --muted: #9aa9bd;
-      --soft: #c8d5e8;
+      --muted: #a3b0c2;
+      --soft: #d4deed;
       --accent: #78f2bd;
       --accent-2: #8eb5ff;
       --accent-3: #f8d97d;
-      --border: rgba(238, 244, 255, .12);
-      --border-strong: rgba(238, 244, 255, .2);
+      --border: rgba(238, 244, 255, .13);
+      --border-strong: rgba(238, 244, 255, .23);
       --shadow: 0 24px 80px rgba(0, 0, 0, .44);
       --radius: 28px;
     }
 
     * { box-sizing: border-box; }
-
     html { scroll-behavior: smooth; }
 
     body {
       margin: 0;
       min-height: 100vh;
-      font: 16px/1.6 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: var(--text);
       background:
-        radial-gradient(circle at 10% -10%, rgba(120, 242, 189, .20), transparent 34rem),
-        radial-gradient(circle at 85% 0%, rgba(142, 181, 255, .18), transparent 32rem),
+        radial-gradient(circle at 12% -10%, rgba(120, 242, 189, .22), transparent 34rem),
+        radial-gradient(circle at 88% 2%, rgba(142, 181, 255, .18), transparent 34rem),
         linear-gradient(180deg, #070a12 0%, #09111d 52%, #070a12 100%);
     }
 
@@ -48,17 +46,13 @@
         linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
         linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
       background-size: 52px 52px;
-      mask-image: linear-gradient(to bottom, rgba(0,0,0,.7), transparent 70%);
+      -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.72), transparent 70%);
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,.72), transparent 70%);
     }
 
     a { color: inherit; text-decoration: none; }
     a:hover { color: var(--accent); }
-
-    a:focus-visible,
-    button:focus-visible {
-      outline: 3px solid rgba(120, 242, 189, .55);
-      outline-offset: 4px;
-    }
+    a:focus-visible { outline: 3px solid rgba(120, 242, 189, .55); outline-offset: 4px; }
 
     .page {
       position: relative;
@@ -85,10 +79,10 @@
     .mark {
       width: 38px;
       height: 38px;
-      border: 1px solid var(--border-strong);
-      border-radius: 14px;
       display: grid;
       place-items: center;
+      border: 1px solid var(--border-strong);
+      border-radius: 14px;
       background: linear-gradient(135deg, rgba(120,242,189,.24), rgba(142,181,255,.18));
       box-shadow: 0 0 36px rgba(120,242,189,.14);
     }
@@ -97,7 +91,6 @@
 
     .links {
       display: flex;
-      align-items: center;
       flex-wrap: wrap;
       justify-content: flex-end;
       gap: 18px;
@@ -111,66 +104,56 @@
       grid-template-columns: minmax(0, 1.05fr) minmax(320px, .95fr);
       gap: 34px;
       align-items: center;
-      padding: 70px 0 54px;
+      padding: 74px 0 58px;
     }
 
     .eyebrow {
       display: inline-flex;
       align-items: center;
-      gap: 10px;
       min-height: 34px;
       padding: 0 13px;
+      margin-bottom: 22px;
       border: 1px solid var(--border);
       border-radius: 999px;
       color: var(--accent);
       background: rgba(120, 242, 189, .08);
       font-size: .8rem;
-      font-weight: 800;
+      font-weight: 850;
       letter-spacing: .12em;
       text-transform: uppercase;
-      margin-bottom: 22px;
     }
 
-    h1,
-    h2,
-    h3 { line-height: 1.04; margin: 0; letter-spacing: -.04em; }
+    h1, h2, h3 { margin: 0; line-height: 1.04; letter-spacing: -.04em; }
 
     h1 {
-      max-width: 840px;
-      font-size: clamp(3.4rem, 8.5vw, 7.8rem);
+      max-width: 860px;
+      margin-bottom: 26px;
+      font-size: clamp(3.4rem, 8.6vw, 7.9rem);
       line-height: .88;
       letter-spacing: -.075em;
-      margin-bottom: 26px;
     }
 
-    h2 {
-      font-size: clamp(2rem, 4vw, 3.6rem);
-      margin-bottom: 16px;
-    }
-
-    h3 { font-size: 1.2rem; margin-bottom: 8px; }
-
+    h2 { margin-bottom: 16px; font-size: clamp(2rem, 4vw, 3.6rem); }
+    h3 { margin-bottom: 8px; font-size: 1.18rem; }
     p { margin: 0; }
 
     .lead {
-      max-width: 760px;
+      max-width: 780px;
+      margin-bottom: 30px;
       color: var(--soft);
       font-size: clamp(1.12rem, 2vw, 1.38rem);
       line-height: 1.55;
-      margin-bottom: 30px;
     }
 
     .muted { color: var(--muted); }
 
-    .actions,
-    .pills {
+    .actions, .pills {
       display: flex;
       flex-wrap: wrap;
       gap: 13px;
     }
 
-    .button,
-    .pill {
+    .button, .pill {
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -201,21 +184,15 @@
       font-weight: 700;
     }
 
-    .panel,
-    .card,
-    .code-card {
+    .panel, .card, .callout {
       border: 1px solid var(--border);
+      border-radius: var(--radius);
       background: linear-gradient(180deg, rgba(255,255,255,.075), rgba(255,255,255,.035));
       box-shadow: var(--shadow);
-      border-radius: var(--radius);
     }
 
     .panel { padding: 26px; }
-
-    .terminal {
-      overflow: hidden;
-      background: #050813;
-    }
+    .terminal { overflow: hidden; background: #050813; }
 
     .terminal-head {
       display: flex;
@@ -230,7 +207,7 @@
     }
 
     .dots { display: flex; gap: 7px; }
-    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--surface-3); }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--surface-2); }
     .dot:nth-child(1) { background: #ff6b6b; }
     .dot:nth-child(2) { background: #ffd166; }
     .dot:nth-child(3) { background: #78f2bd; }
@@ -238,18 +215,37 @@
     pre {
       margin: 0;
       padding: 22px;
-      overflow-x: auto;
+      overflow-x: hidden;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
       color: #dbeafe;
       font: 14px/1.65 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
 
     .prompt { color: var(--accent); }
     .comment { color: #7d8da5; }
+    .cmd { color: #f8d97d; }
+    .thinking { color: #7d8da5; }
+    .answer { color: #dbeafe; }
+    .cursor {
+      display: inline-block;
+      width: .62em;
+      height: 1.15em;
+      margin-left: 2px;
+      transform: translateY(.18em);
+      background: var(--accent);
+      animation: blink 1s steps(2, start) infinite;
+    }
+
+    @keyframes blink {
+      0%, 49% { opacity: 1; }
+      50%, 100% { opacity: 0; }
+    }
 
     .section { padding: 58px 0; }
 
     .section-head {
-      max-width: 780px;
+      max-width: 800px;
       margin-bottom: 28px;
     }
 
@@ -274,25 +270,28 @@
 
     .card p { color: var(--muted); }
 
-    .card .label {
+    .label {
+      margin-bottom: 12px;
       color: var(--accent);
       font-size: .78rem;
       text-transform: uppercase;
       letter-spacing: .12em;
       font-weight: 850;
-      margin-bottom: 12px;
     }
 
-    .callout {
+    .workflow {
       display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 24px;
-      align-items: center;
-      padding: 28px;
-      border: 1px solid rgba(120, 242, 189, .24);
-      border-radius: var(--radius);
-      background: linear-gradient(135deg, rgba(120,242,189,.12), rgba(142,181,255,.08));
-      box-shadow: var(--shadow);
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .workflow .card { min-height: 170px; }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr);
+      gap: 22px;
+      align-items: start;
     }
 
     .steps {
@@ -325,30 +324,15 @@
       font-weight: 900;
     }
 
-    .split {
-      display: grid;
-      grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr);
-      gap: 22px;
-      align-items: start;
+    .quote {
+      padding: 28px;
+      border: 1px solid rgba(120, 242, 189, .24);
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, rgba(120,242,189,.12), rgba(142,181,255,.08));
+      box-shadow: var(--shadow);
     }
 
-    .compare {
-      display: grid;
-      gap: 12px;
-    }
-
-    .compare-row {
-      display: grid;
-      grid-template-columns: 190px 1fr;
-      gap: 16px;
-      padding: 16px;
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      background: rgba(255,255,255,.04);
-    }
-
-    .compare-row strong { color: var(--text); }
-    .compare-row span { color: var(--muted); }
+    .quote strong { color: var(--text); }
 
     .operator {
       border-color: rgba(248, 217, 125, .25);
@@ -382,6 +366,16 @@
       box-shadow: 0 0 0 5px rgba(120,242,189,.10);
     }
 
+    .callout {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: center;
+      padding: 28px;
+      border-color: rgba(120, 242, 189, .24);
+      background: linear-gradient(135deg, rgba(120,242,189,.12), rgba(142,181,255,.08));
+    }
+
     footer {
       display: flex;
       justify-content: space-between;
@@ -393,13 +387,8 @@
     }
 
     @media (max-width: 920px) {
-      .hero,
-      .split,
-      .callout { grid-template-columns: 1fr; }
-      .grid,
-      .grid.two,
-      .grid.four { grid-template-columns: 1fr 1fr; }
-      .callout .actions { justify-content: flex-start; }
+      .hero, .split, .callout { grid-template-columns: 1fr; }
+      .grid, .grid.two, .grid.four, .workflow { grid-template-columns: 1fr 1fr; }
     }
 
     @media (max-width: 640px) {
@@ -408,11 +397,8 @@
       .links { justify-content: flex-start; gap: 12px; }
       .hero { padding-top: 38px; }
       h1 { font-size: clamp(3rem, 16vw, 4.5rem); }
-      .grid,
-      .grid.two,
-      .grid.four { grid-template-columns: 1fr; }
-      .compare-row { grid-template-columns: 1fr; }
-      .panel, .card, .callout { padding: 20px; border-radius: 22px; }
+      .grid, .grid.two, .grid.four, .workflow { grid-template-columns: 1fr; }
+      .panel, .card, .callout, .quote { padding: 20px; border-radius: 22px; }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -433,9 +419,10 @@
         HIVEMIND
       </a>
       <nav class="links">
+        <a href="#skill">/hive skill</a>
         <a href="#quickstart">Quickstart</a>
-        <a href="#use-cases">Use cases</a>
-        <a href="#operators">Run a node</a>
+        <a href="#teams">Teams</a>
+        <a href="#operators">Node owners</a>
         <a href="https://github.com/nootr/hivemind">GitHub</a>
       </nav>
     </header>
@@ -443,86 +430,49 @@
     <main id="top">
       <section class="hero" aria-labelledby="hero-title">
         <div>
-          <div class="eyebrow">Shared memory for AI agents</div>
-          <h1 id="hero-title">Give your agents memory they can move.</h1>
-          <p class="lead">HIVEMIND is a local-first memory layer for AI agents. Publish useful facts, procedures, skills and insights. Find them by ID or tag. Transfer verified memory between nodes without trusting the sender.</p>
+          <div class="eyebrow">The /hive skill for shared agent memory</div>
+          <h1 id="hero-title">Teach once. Reuse everywhere.</h1>
+          <p class="lead">HIVEMIND gives your AI agents a shared memory they can write to, search and reuse. Install the <strong>/hive</strong> skill once; agents then check relevant memory and publish new learnings automatically.</p>
           <div class="actions">
-            <a class="button primary" href="https://github.com/nootr/hivemind#local-demo">Run the local demo</a>
-            <a class="button" href="https://github.com/nootr/hivemind">View on GitHub</a>
+            <a class="button primary" href="#quickstart">Set up /hive</a>
+            <a class="button" href="#skill">See the two-minute demo</a>
           </div>
         </div>
 
-        <aside class="panel terminal" aria-label="Quickstart terminal example">
+        <aside id="skill" class="panel terminal" aria-label="Two-minute hive skill demo">
           <div class="terminal-head">
             <div class="dots" aria-hidden="true"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
-            <span>two-minute demo</span>
+            <span>two-minute /hive demo</span>
           </div>
-          <pre><code><span class="prompt">$</span> git clone https://github.com/nootr/hivemind
-<span class="prompt">$</span> cd hivemind
-<span class="prompt">$</span> scripts/local-demo.sh
-
-<span class="comment"># publish, retrieve, find by tag</span>
-<span class="comment"># export/import verified memory</span>
-
-<span class="prompt">$</span> scripts/two-node-transfer-demo.sh
-<span class="comment"># move memory from node A to node B</span></code></pre>
+          <pre><code id="hive-demo" aria-live="polite"></code><span class="cursor" aria-hidden="true"></span></pre>
         </aside>
       </section>
 
-      <section class="section" aria-labelledby="today-title">
+      <section class="section" aria-labelledby="value-title">
         <div class="section-head">
-          <h2 id="today-title">Useful today, bigger tomorrow.</h2>
-          <p>Start with a local node and HTTP API. The current implementation proves the core developer loop before adding wider network automation.</p>
+          <h2 id="value-title">Memory that behaves like a team asset.</h2>
+          <p>Agents stop relearning the same facts in every chat. Your best fixes, decisions and procedures become searchable memory objects that travel across tools, teammates and nodes.</p>
         </div>
-        <div class="grid four">
+        <div class="workflow">
           <article class="card">
-            <div class="label">Publish</div>
-            <h3>Store agent memory</h3>
-            <p>Create signed memory objects for facts, procedures, skills and insights.</p>
+            <div class="label">Capture</div>
+            <h3>Save useful context</h3>
+            <p>Turn discoveries, runbooks, project rules and skills into durable agent memory.</p>
           </article>
           <article class="card">
-            <div class="label">Retrieve</div>
-            <h3>Fetch by object ID</h3>
-            <p>Resolve exact objects and reconstruct inline or chunked payloads.</p>
+            <div class="label">Find</div>
+            <h3>Search by intent or tag</h3>
+            <p>Ask /hive for the memory your agent needs before it starts work.</p>
           </article>
           <article class="card">
-            <div class="label">Discover</div>
-            <h3>Find by tag</h3>
-            <p>Use simple exact tags for local discovery and agent workflows.</p>
+            <div class="label">Reuse</div>
+            <h3>Load into the task</h3>
+            <p>Inject the right memory into the current session, agent or workflow.</p>
           </article>
           <article class="card">
-            <div class="label">Transfer</div>
-            <h3>Move verified content</h3>
-            <p>Export signed envelopes, plan imports, transfer chunks and verify on receipt.</p>
-          </article>
-        </div>
-      </section>
-
-      <section id="use-cases" class="section" aria-labelledby="audience-title">
-        <div class="section-head">
-          <h2 id="audience-title">Built for people shipping agents.</h2>
-          <p>Different users come for different reasons: faster agent development, safer memory sharing, easier integrations, or lightweight node operation.</p>
-        </div>
-        <div class="grid two">
-          <article class="card">
-            <div class="label">Agent developers</div>
-            <h3>Add portable memory to your agents</h3>
-            <p>Use a local API to publish what an agent learns, retrieve it later, and move useful memory into another runtime or environment.</p>
-          </article>
-          <article class="card">
-            <div class="label">AI product teams</div>
-            <h3>Share knowledge across agents and services</h3>
-            <p>Keep memory objects verifiable and portable instead of trapping them inside one app database or one vendor stack.</p>
-          </article>
-          <article class="card">
-            <div class="label">Framework integrators</div>
-            <h3>Plug in a shared memory backend</h3>
-            <p>Build adapters for agent frameworks, MCP servers, CLIs or workflow engines on top of simple publish/find/transfer primitives.</p>
-          </article>
-          <article id="operators" class="card operator">
-            <div class="label">Node operators</div>
-            <h3>Run storage without proof-of-work</h3>
-            <p>Operate a lightweight content node. Provider rewards and stake-backed accountability are planned layers, not a live earning claim today.</p>
+            <div class="label">Share</div>
+            <h3>Move verified memory</h3>
+            <p>Send signed memory between nodes so another agent can trust what it imports.</p>
           </article>
         </div>
       </section>
@@ -530,114 +480,195 @@
       <section id="quickstart" class="section" aria-labelledby="quickstart-title">
         <div class="split">
           <div class="section-head">
-            <h2 id="quickstart-title">The first experience should be boringly simple.</h2>
-            <p>A developer should not need to understand consensus, routing or settlement to see the value. They should run a node, publish memory and transfer it between two local nodes.</p>
+            <h2 id="quickstart-title">Quickstart: add shared memory to your agent.</h2>
+            <p>Enable the /hive skill once. After that, your agent checks relevant memory before work starts and saves useful learnings when the task is done.</p>
           </div>
           <div class="steps">
             <div class="step">
               <div>
-                <h3>Run one local node</h3>
-                <p class="muted">Publish a memory object, retrieve it by ID and find it by tag.</p>
+                <h3>Add /hive to your agent</h3>
+                <p class="muted">Install the HIVEMIND skill in your AI workspace and connect it to your memory account.</p>
               </div>
             </div>
             <div class="step">
               <div>
-                <h3>Export a signed envelope</h3>
-                <p class="muted">Get portable, verifiable object metadata plus transfer chunk details.</p>
+                <h3>Save your first memory</h3>
+                <p class="muted"><code>/hive remember</code> captures the answer, rule, fix or procedure you want future agents to reuse.</p>
               </div>
             </div>
             <div class="step">
               <div>
-                <h3>Transfer to another node</h3>
-                <p class="muted">Plan the import, fetch missing chunks, import the envelope and verify the payload.</p>
+                <h3>Let the agent check memory</h3>
+                <p class="muted">Before a task starts, the skill searches for relevant team memory and loads it into context.</p>
+              </div>
+            </div>
+            <div class="step">
+              <div>
+                <h3>Publish useful learnings</h3>
+                <p class="muted">When the task reveals a reusable fix, rule or decision, the agent saves it back to /hive.</p>
               </div>
             </div>
           </div>
         </div>
       </section>
 
-      <section class="section" aria-labelledby="why-title">
+      <section id="teams" class="section" aria-labelledby="people-title">
         <div class="section-head">
-          <h2 id="why-title">Why not just use a vector database?</h2>
-          <p>Private memory stores are useful. HIVEMIND is for memory that should be portable, reusable and verifiable across agents and nodes.</p>
+          <h2 id="people-title">For every role around AI work.</h2>
+          <p>The same shared memory layer helps individual agent users, product teams, developers and infrastructure operators.</p>
         </div>
-        <div class="compare">
-          <div class="compare-row">
-            <strong>Portable objects</strong>
-            <span>Memory can move as signed envelopes and content-addressed chunks, not just rows in one database.</span>
-          </div>
-          <div class="compare-row">
-            <strong>Verifiable provenance</strong>
-            <span>Objects carry author identity and signatures so receivers can verify what they import.</span>
-          </div>
-          <div class="compare-row">
-            <strong>Agent-native shape</strong>
-            <span>Facts, skills, procedures, insights, references and tags are first-class building blocks.</span>
-          </div>
-          <div class="compare-row">
-            <strong>Local-first path</strong>
-            <span>Start with a local HTTP API. Network discovery, provider behavior and settlement can come later.</span>
-          </div>
-        </div>
-      </section>
-
-      <section class="section" aria-labelledby="operators-title">
-        <div class="callout">
-          <div>
-            <h2 id="operators-title">For future node owners: storage, not mining.</h2>
-            <p class="muted">The planned network is about storing and serving verifiable memory. No proof-of-work. Future provider rewards and PoS-style accountability belong in the roadmap section until they are implemented.</p>
-          </div>
-          <div class="actions">
-            <a class="button" href="https://github.com/nootr/hivemind/blob/main/docs/two-node-transfer.md">See transfer demo</a>
-          </div>
-        </div>
-      </section>
-
-      <section class="section" aria-labelledby="status-title">
         <div class="grid two">
-          <div class="card">
-            <div class="label">Available now</div>
-            <h2 id="status-title">Local memory primitives</h2>
-            <ul class="status-list">
-              <li>Bearer-protected local HTTP API</li>
-              <li>Signed object envelopes and deterministic CBOR</li>
-              <li>Inline and chunked payloads</li>
-              <li>Tag lookup, references and backlinks</li>
-              <li>Two-node verified transfer demo</li>
-            </ul>
-          </div>
-          <div class="card">
-            <div class="label">Roadmap</div>
-            <h2>Networked shared memory</h2>
-            <ul class="status-list">
-              <li>Automated node-to-node transfer</li>
-              <li>DHT/content routing</li>
-              <li>Provider availability and audit flows</li>
-              <li>Stake-backed identities and reward settlement</li>
-              <li>Framework SDKs and agent integrations</li>
-            </ul>
-          </div>
+          <article class="card">
+            <div class="label">Agent users</div>
+            <h3>Stop repeating yourself</h3>
+            <p>Save the context your agent keeps asking for: repo rules, project decisions, customer details, runbooks and known fixes.</p>
+          </article>
+          <article class="card">
+            <div class="label">AI product teams</div>
+            <h3>Give every agent the same source of memory</h3>
+            <p>Share useful knowledge across assistants, coding agents, workflows and environments without locking it inside one chat history.</p>
+          </article>
+          <article class="card">
+            <div class="label">Developers</div>
+            <h3>Build agents that learn from each other</h3>
+            <p>Use the API behind /hive to publish, retrieve, tag, reference and import verified memory objects from your own tools.</p>
+          </article>
+          <article class="card">
+            <div class="label">Integrators</div>
+            <h3>Bring shared memory to any agent framework</h3>
+            <p>Connect /hive semantics to CLIs, MCP servers, agent frameworks and workflow engines.</p>
+          </article>
         </div>
       </section>
 
-      <section class="section" aria-labelledby="docs-title">
+      <section class="section" aria-labelledby="examples-title">
+        <div class="section-head">
+          <h2 id="examples-title">What belongs in /hive?</h2>
+          <p>Anything that should survive the chat and help a future agent do better work.</p>
+        </div>
+        <div class="grid four">
+          <article class="card">
+            <div class="label">Runbooks</div>
+            <h3>“Deploy this service safely.”</h3>
+            <p>Operational procedures, rollback steps and incident notes.</p>
+          </article>
+          <article class="card">
+            <div class="label">Project facts</div>
+            <h3>“This repo uses these conventions.”</h3>
+            <p>Architecture choices, naming rules and team preferences.</p>
+          </article>
+          <article class="card">
+            <div class="label">Skills</div>
+            <h3>“Here is how we solve this class of task.”</h3>
+            <p>Reusable agent instructions, tactics and workflows.</p>
+          </article>
+          <article class="card">
+            <div class="label">Decisions</div>
+            <h3>“We tried X; use Y instead.”</h3>
+            <p>Tradeoffs and lessons that prevent repeated mistakes.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="trust-title">
+        <div class="quote">
+          <h2 id="trust-title">Not just a bigger prompt.</h2>
+          <p class="muted">HIVEMIND memory is portable and verifiable. A receiving agent can check where memory came from, what it references and whether the content arrived intact. The protocol stays in the background; the user sees a simple /hive command.</p>
+        </div>
+      </section>
+
+      <section id="operators" class="section" aria-labelledby="operator-title">
+        <div class="grid two">
+          <article class="card operator">
+            <div class="label">Node owners</div>
+            <h2 id="operator-title">Run memory capacity, not proof-of-work.</h2>
+            <p>Node owners store and serve verified memory for the network. Rewards are tied to useful storage and availability, backed by proof-of-stake accountability instead of wasteful mining.</p>
+          </article>
+          <article class="card">
+            <div class="label">Why users care</div>
+            <h2>More nodes means better shared memory.</h2>
+            <ul class="status-list">
+              <li>More availability for public and team memory</li>
+              <li>Content-addressed storage with integrity checks</li>
+              <li>Signed provenance for imported memory</li>
+              <li>Portable memory objects that are not trapped in one app</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="cta-title">
         <div class="callout">
           <div>
-            <h2 id="docs-title">Start with the tool. Read the protocol when you need it.</h2>
-            <p class="muted">Most users should begin with demos and API behavior. Protocol details are available for contributors and integrators who need the deeper model.</p>
+            <h2 id="cta-title">Start with one command.</h2>
+            <p class="muted">Install /hive, save the memory your agent should not forget, and reuse it in the next task.</p>
           </div>
           <div class="actions">
-            <a class="button primary" href="https://github.com/nootr/hivemind#local-demo">Run demos</a>
-            <a class="button" href="https://github.com/nootr/hivemind/blob/main/docs/architecture-v1.md">Architecture notes</a>
+            <a class="button primary" href="#quickstart">Set up /hive</a>
+            <a class="button" href="https://github.com/nootr/hivemind">GitHub</a>
           </div>
         </div>
       </section>
     </main>
 
     <footer>
-      <span>HIVEMIND is early-stage infrastructure for shared AI agent memory.</span>
-      <span><a href="https://github.com/nootr/hivemind">GitHub</a> · <a href="https://github.com/nootr/hivemind/blob/main/docs/local-demo.md">Local demo docs</a></span>
+      <span>HIVEMIND gives AI agents shared, reusable memory.</span>
+      <span><a href="https://github.com/nootr/hivemind">GitHub</a> · <a href="#skill">/hive demo</a></span>
     </footer>
   </div>
+  <script>
+    const demo = document.getElementById("hive-demo");
+    const cursor = document.querySelector(".cursor");
+    const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const script = [
+      [{ className: "prompt", text: "> " }, { text: "Please set up the " }, { className: "cmd", text: "/hive" }, { text: " skill from nootr.github.io/hivemind." }],
+      [{ text: "\n\n" }],
+      [{ className: "thinking", text: "Setting up /hive…\nConnecting to HIVEMIND memory…" }],
+      [{ text: "\n" }],
+      [{ className: "answer", text: "Done. I’ll automatically check shared memory when it can help." }],
+      [{ text: "\n\n" }],
+      [{ className: "prompt", text: "> " }, { text: "Fix the billing worker so invoice retries stop failing." }],
+      [{ text: "\n\n" }],
+      [{ className: "thinking", text: "Checking /hive for billing, stripe and worker context…" }],
+      [{ text: "\n" }],
+      [{ className: "answer", text: "Found: “Stripe webhook replay runbook”.\nI’ll replay failed webhooks before retrying invoices." }],
+      [{ text: "\n\n" }],
+      [{ className: "thinking", text: "After the fix: publishing the new learning back to /hive…" }],
+      [{ text: "\n" }],
+      [{ className: "answer", text: "Saved: “Verify Stripe webhook idempotency before replay”.\nFuture agents can reuse it automatically." }]
+    ];
+
+    function appendText(text, className) {
+      const span = document.createElement("span");
+      if (className) span.className = className;
+      span.textContent = text;
+      demo.appendChild(span);
+    }
+
+    function renderFull() {
+      for (const line of script) {
+        for (const part of line) appendText(part.text, part.className);
+      }
+      if (cursor) cursor.style.display = "none";
+    }
+
+    async function typeDemo() {
+      for (const line of script) {
+        for (const part of line) {
+          for (const char of part.text) {
+            appendText(char, part.className);
+            await new Promise(resolve => setTimeout(resolve, char === "\n" ? 80 : 18));
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 260));
+      }
+    }
+
+    if (demo) {
+      if (prefersReducedMotion) renderFull();
+      else typeDemo();
+    }
+  </script>
 </body>
 </html>
