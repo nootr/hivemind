@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use hivemind_core::{valid_node_id, ChatMessage, PeerInfo, PeerRecord};
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, env, fs, path::PathBuf, time::Duration};
 
 const DEFAULT_NODE_URL: &str = "http://127.0.0.1:7747";
 
@@ -225,13 +225,10 @@ async fn ask(
     let sent = say(client, text, room).await?;
     tokio::time::sleep(Duration::from_secs(wait_secs)).await;
     let replies = fetch_messages(client, room, since).await?.messages;
+    let authors = author_trust(client).await?;
     let mut lines = vec![sent, "".to_owned(), "Replies:".to_owned()];
     for reply in replies.into_iter().filter(|message| message.text != text) {
-        lines.push(format!(
-            "{}: {}",
-            short_id(&reply.author_node_id),
-            reply.text
-        ));
+        lines.push(format_message(&reply, &authors));
     }
     Ok(lines.join("\n"))
 }
@@ -241,14 +238,14 @@ async fn chat(client: &reqwest::Client, room: &str, after_ms: u64) -> Result<Str
     if messages.is_empty() {
         return Ok("no messages".to_owned());
     }
+    let authors = author_trust(client).await?;
     Ok(messages
         .into_iter()
         .map(|message| {
             format!(
-                "{} {}: {}",
+                "{} {}",
                 message.created_at_ms,
-                short_id(&message.author_node_id),
-                message.text
+                format_message(&message, &authors)
             )
         })
         .collect::<Vec<_>>()
@@ -292,6 +289,30 @@ async fn fetch_messages(
         .error_for_status()?
         .json::<MessagesResponse>()
         .await?)
+}
+
+async fn author_trust(client: &reqwest::Client) -> Result<BTreeMap<String, String>, CliError> {
+    let mut authors = BTreeMap::new();
+    let node = node_info(client).await?;
+    authors.insert(node.node_id, "self".to_owned());
+    for peer in fetch_peers(client).await?.peers {
+        let label = if peer.trusted { "trusted" } else { "untrusted" };
+        authors.insert(peer.node_id, label.to_owned());
+    }
+    Ok(authors)
+}
+
+fn format_message(message: &ChatMessage, authors: &BTreeMap<String, String>) -> String {
+    let label = authors
+        .get(&message.author_node_id)
+        .map(String::as_str)
+        .unwrap_or("untrusted");
+    format!(
+        "[{}] {}: {}",
+        label,
+        short_id(&message.author_node_id),
+        message.text
+    )
 }
 
 fn node_url() -> String {
@@ -370,6 +391,24 @@ mod tests {
                     }
                 }
             }
+        );
+    }
+
+    #[test]
+    fn formats_message_with_trust_label() {
+        let mut authors = BTreeMap::new();
+        authors.insert("a".repeat(64), "trusted".to_owned());
+        let message = ChatMessage {
+            id: "id".to_owned(),
+            room: "default".to_owned(),
+            author_node_id: "a".repeat(64),
+            created_at_ms: 1,
+            text: "hello".to_owned(),
+            signature: "sig".to_owned(),
+        };
+        assert_eq!(
+            format_message(&message, &authors),
+            "[trusted] aaaaaaaa: hello"
         );
     }
 

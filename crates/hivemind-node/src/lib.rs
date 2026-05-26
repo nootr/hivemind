@@ -9,7 +9,8 @@ use hivemind_core::{valid_node_id, ChatMessage, NodeKey, PeerInfo, PeerRecord};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket},
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
@@ -21,6 +22,7 @@ const DISCOVERY_PORT: u16 = 7748;
 const DISCOVERY_PREFIX: &str = "HIVEMIND_NODE_V2 ";
 const BEACON_FAST_SECS: u64 = 2;
 const BEACON_SLOW_SECS: u64 = 20;
+const PEER_FETCH_TIMEOUT_SECS: u64 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct NodeConfig {
@@ -307,7 +309,7 @@ async fn discovery_loop(
                 if let Some(peer) = parse_beacon(&text) {
                     if peer.node_id != state.key.node_id() {
                         remember_peer(&state, peer.clone(), "beacon");
-                        fetch_peer_list(state.clone(), peer.clone()).await;
+                        tokio::spawn(fetch_peer_list(state.clone(), peer.clone()));
                     }
                 } else if text.trim() == "HIVEMIND_DISCOVER_V2" {
                     let info = self_peer(bind_addr, public_url.as_deref(), &state, peer_addr);
@@ -378,7 +380,17 @@ fn remember_peer(state: &AppState, peer: PeerInfo, source: &str) {
 }
 
 async fn fetch_peer_list(state: AppState, peer: PeerInfo) {
-    let Ok(response) = reqwest::get(format!("{}/v1/peers", peer.node_url)).await else {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(PEER_FETCH_TIMEOUT_SECS))
+        .build()
+    else {
+        return;
+    };
+    let Ok(response) = client
+        .get(format!("{}/v1/peers", peer.node_url))
+        .send()
+        .await
+    else {
         return;
     };
     let Ok(response) = response.error_for_status() else {
@@ -402,10 +414,10 @@ async fn fetch_peer_list(state: AppState, peer: PeerInfo) {
 }
 
 fn gossip_message(state: AppState, message: ChatMessage) {
-    let peers = state.store.peers.lock().expect("peer lock").clone();
+    let peers = trusted_peers(&state);
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        for peer in peers.values() {
+        for peer in peers {
             let _ = client
                 .post(format!("{}/v1/chat/import", peer.node_url))
                 .json(&message)
@@ -413,6 +425,18 @@ fn gossip_message(state: AppState, message: ChatMessage) {
                 .await;
         }
     });
+}
+
+fn trusted_peers(state: &AppState) -> Vec<PeerRecord> {
+    state
+        .store
+        .peers
+        .lock()
+        .expect("peer lock")
+        .values()
+        .filter(|peer| peer.trusted)
+        .cloned()
+        .collect()
 }
 
 fn peer_count(state: &AppState) -> usize {
@@ -451,14 +475,48 @@ fn now_ms() -> u64 {
 
 fn load_or_create_key(path: &FsPath) -> Result<NodeKey, NodeError> {
     if path.exists() {
+        restrict_key_permissions(path)?;
         return Ok(NodeKey::from_seed_hex(&fs::read_to_string(path)?)?);
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let key = NodeKey::generate()?;
-    fs::write(path, format!("{}\n", key.seed_hex()))?;
+    write_private_key(path, &format!("{}\n", key.seed_hex()))?;
     Ok(key)
+}
+
+#[cfg(unix)]
+fn write_private_key(path: &FsPath, content: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(content.as_bytes())?;
+    restrict_key_permissions(path)
+}
+
+#[cfg(not(unix))]
+fn write_private_key(path: &FsPath, content: &str) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(content.as_bytes())
+}
+
+#[cfg(unix)]
+fn restrict_key_permissions(path: &FsPath) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn restrict_key_permissions(_path: &FsPath) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn local_node_url(bind_addr: SocketAddr) -> String {
@@ -512,6 +570,38 @@ mod tests {
             parse_beacon(&format!("{DISCOVERY_PREFIX}ftp://x {}", "a".repeat(64))),
             None
         );
+    }
+
+    #[test]
+    fn trusted_peers_excludes_untrusted_candidates() {
+        let state = test_state();
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://untrusted".to_owned(),
+                node_id: "b".repeat(64),
+            },
+            "test",
+        );
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://trusted".to_owned(),
+                node_id: "c".repeat(64),
+            },
+            "test",
+        );
+        state
+            .store
+            .peers
+            .lock()
+            .unwrap()
+            .get_mut(&"c".repeat(64))
+            .unwrap()
+            .trusted = true;
+        let peers = trusted_peers(&state);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].node_url, "http://trusted");
     }
 
     #[test]
@@ -606,6 +696,43 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let peer: PeerRecord = serde_json::from_slice(&bytes).unwrap();
         assert!(peer.trusted);
+    }
+
+    #[tokio::test]
+    async fn import_rejects_wrong_message_id() {
+        let state = test_state();
+        let mut message = state.key.sign_chat("default", 123, "hello");
+        message.id = "wrong".to_owned();
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/import")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&message).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn creates_private_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.key");
+        load_or_create_key(&path).unwrap();
+        assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[tokio::test]

@@ -70,7 +70,7 @@ Messages contain:
 - text
 - signature
 
-Nodes verify signatures before importing messages. Messages are gossiped to known peers. Untrusted authors can still be visible, but agents should not treat them as reliable context unless the user has trusted that node.
+Nodes verify signatures and canonical message IDs before importing messages. Outbound messages are gossiped only to trusted peers. Untrusted authors can still be visible when messages arrive through explicit imports or future public flows, but agents should not treat them as reliable context unless the user has trusted that node.
 
 ## Readiness
 

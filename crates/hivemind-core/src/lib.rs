@@ -1,5 +1,6 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
@@ -11,6 +12,8 @@ pub enum CoreError {
     InvalidKey,
     #[error("invalid signature")]
     InvalidSignature,
+    #[error("invalid message id")]
+    InvalidMessageId,
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -56,7 +59,13 @@ impl NodeKey {
         let signing_bytes = unsigned.signing_bytes().expect("chat signing bytes encode");
         let signature = self.signing_key.sign(&signing_bytes);
         let signature_hex = hex::encode(signature.to_bytes());
-        let id = message_id(&author_node_id, created_at_ms, &signature_hex);
+        let id = message_id(
+            &unsigned.room,
+            &author_node_id,
+            created_at_ms,
+            &unsigned.text,
+            &signature_hex,
+        );
         ChatMessage {
             id,
             room: unsigned.room,
@@ -107,7 +116,20 @@ impl UnsignedChatMessage {
 }
 
 impl ChatMessage {
+    pub fn expected_id(&self) -> String {
+        message_id(
+            &self.room,
+            &self.author_node_id,
+            self.created_at_ms,
+            &self.text,
+            &self.signature,
+        )
+    }
+
     pub fn verify(&self) -> Result<(), CoreError> {
+        if self.id != self.expected_id() {
+            return Err(CoreError::InvalidMessageId);
+        }
         let key_bytes = hex::decode(&self.author_node_id)?;
         let key_bytes: [u8; 32] = key_bytes.try_into().map_err(|_| CoreError::InvalidKey)?;
         let verifying_key =
@@ -133,14 +155,25 @@ pub fn valid_node_id(node_id: &str) -> bool {
     node_id.len() == 64 && node_id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn message_id(author_node_id: &str, created_at_ms: u64, signature: &str) -> String {
-    let mut bytes = [0_u8; 16];
-    let input = format!("{author_node_id}:{created_at_ms}:{signature}");
-    for (index, byte) in input.bytes().enumerate() {
-        bytes[index % bytes.len()] ^= byte;
-        bytes[(index * 7) % bytes.len()] = bytes[(index * 7) % bytes.len()].wrapping_add(byte);
-    }
-    hex::encode(bytes)
+fn message_id(
+    room: &str,
+    author_node_id: &str,
+    created_at_ms: u64,
+    text: &str,
+    signature: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hash_field(&mut hasher, room.as_bytes());
+    hash_field(&mut hasher, author_node_id.as_bytes());
+    hash_field(&mut hasher, &created_at_ms.to_be_bytes());
+    hash_field(&mut hasher, text.as_bytes());
+    hash_field(&mut hasher, signature.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
 }
 
 #[cfg(test)]
@@ -167,7 +200,7 @@ mod tests {
         let other = NodeKey::generate().unwrap();
         let mut message = key.sign_chat("default", 123, "hello");
         message.author_node_id = other.node_id();
-        assert!(matches!(message.verify(), Err(CoreError::InvalidSignature)));
+        assert!(matches!(message.verify(), Err(CoreError::InvalidMessageId)));
     }
 
     #[test]
@@ -175,7 +208,15 @@ mod tests {
         let key = NodeKey::generate().unwrap();
         let mut message = key.sign_chat("default", 123, "hello");
         message.text = "tampered".to_owned();
-        assert!(matches!(message.verify(), Err(CoreError::InvalidSignature)));
+        assert!(matches!(message.verify(), Err(CoreError::InvalidMessageId)));
+    }
+
+    #[test]
+    fn changed_id_fails_verification() {
+        let key = NodeKey::generate().unwrap();
+        let mut message = key.sign_chat("default", 123, "hello");
+        message.id = "bad".to_owned();
+        assert!(matches!(message.verify(), Err(CoreError::InvalidMessageId)));
     }
 
     #[test]

@@ -46,7 +46,7 @@ Marks a known peer trusted by node ID/public key. Never trust by URL/IP.
 
 ### `hive say`
 
-Posts a signed text message to the default chatroom and gossips it to known peers.
+Posts a signed text message to the default chatroom and gossips it to trusted peers.
 
 ### `hive ask --wait-secs N`
 
