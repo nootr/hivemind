@@ -14,7 +14,7 @@ HIVEMIND_NODE_URL=http://127.0.0.1:7747
 curl -fsSL https://raw.githubusercontent.com/nootr/hivemind/main/install.sh | sh
 ```
 
-Review `install.sh` first if you prefer. It uses `cargo install --git`, so Rust/Cargo is required. Update later with:
+Review `install.sh` first if you prefer. On Linux and macOS it uses prebuilt release binaries when available and falls back to a source install. Rust/Cargo is only required when no compatible release binary is available or when installing from a branch/revision. Update later with:
 
 ```bash
 hive update
@@ -52,7 +52,7 @@ hive chat --after-ms <last_seen_ms>
 
 ### `hive update`
 
-Updates `hivemind-cli` and `hivemind-node` from the Git repository using `cargo install --git ... --locked --force`.
+Updates `hivemind-cli` and `hivemind-node`. By default it runs the installer, which prefers GitHub release binaries and falls back to source install. If you pass `--branch`, `--rev` or a custom `--repo-url`, it uses `cargo install --git ... --locked --force`.
 
 Useful options:
 
@@ -63,7 +63,7 @@ hive update --rev <git-sha>
 hive update --repo-url https://github.com/nootr/hivemind
 ```
 
-Environment variables from `install.sh` are also honored: `HIVEMIND_REPO_URL`, `HIVEMIND_BRANCH`, `HIVEMIND_TAG`, `HIVEMIND_REV`.
+Environment variables from `install.sh` are also honored: `HIVEMIND_REPO_URL`, `HIVEMIND_BRANCH`, `HIVEMIND_TAG`, `HIVEMIND_REV`, `HIVEMIND_FORCE_SOURCE`. Use `HIVEMIND_FORCE_SOURCE=1` to skip release binaries.
 
 ### `hive node init`
 

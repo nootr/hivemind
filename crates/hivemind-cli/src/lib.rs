@@ -11,6 +11,8 @@ use std::{
 
 const DEFAULT_NODE_URL: &str = "http://127.0.0.1:7747";
 const DEFAULT_REPO_URL: &str = "https://github.com/nootr/hivemind";
+const DEFAULT_INSTALL_URL: &str =
+    "https://raw.githubusercontent.com/nootr/hivemind/main/install.sh";
 
 #[derive(Debug, Parser, Eq, PartialEq)]
 #[command(name = "hive")]
@@ -208,16 +210,62 @@ fn update(
         return Err(CliError::MultipleUpdateRefs);
     }
 
-    for package in ["hivemind-cli", "hivemind-node"] {
-        update_package(
-            package,
-            &repo_url,
-            branch.as_deref(),
-            tag.as_deref(),
-            rev.as_deref(),
-        )?;
+    if branch.is_none() && rev.is_none() && repo_url == DEFAULT_REPO_URL {
+        if let Err(installer_err) = update_with_installer(tag.as_deref()) {
+            if command_available("cargo") && command_available("git") {
+                for package in ["hivemind-cli", "hivemind-node"] {
+                    update_package(package, &repo_url, None, tag.as_deref(), None)?;
+                }
+            } else {
+                return Err(installer_err);
+            }
+        }
+    } else {
+        for package in ["hivemind-cli", "hivemind-node"] {
+            update_package(
+                package,
+                &repo_url,
+                branch.as_deref(),
+                tag.as_deref(),
+                rev.as_deref(),
+            )?;
+        }
     }
-    Ok("HIVEMIND updated. Run `hive node status` to verify your local node.".to_owned())
+    Ok(
+        "HIVEMIND updated. Restart the node if it is already running, then run `hive node status`."
+            .to_owned(),
+    )
+}
+
+fn update_with_installer(tag: Option<&str>) -> Result<(), CliError> {
+    let install_url =
+        env::var("HIVEMIND_INSTALL_URL").unwrap_or_else(|_| DEFAULT_INSTALL_URL.to_owned());
+    let mut command = ProcessCommand::new("sh");
+    command
+        .arg("-c")
+        .arg("curl -fsSL \"$HIVEMIND_INSTALL_URL\" | sh");
+    command.env("HIVEMIND_INSTALL_URL", install_url);
+    if let Some(tag) = tag {
+        command.env("HIVEMIND_TAG", tag);
+    }
+    let status = command.status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CliError::UpdateFailed(format!(
+            "installer exited with {status}"
+        )))
+    }
+}
+
+fn command_available(command: &str) -> bool {
+    ProcessCommand::new(command)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 fn update_package(

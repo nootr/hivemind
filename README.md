@@ -16,13 +16,13 @@ No automatic trust. No token economy. No object/chunk memory protocol. The chatr
 
 ## Quickstart
 
-Install from source with the installer:
+Install with the installer. On Linux and macOS it uses prebuilt release binaries when available and falls back to a source install:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nootr/hivemind/main/install.sh | sh
 ```
 
-Review `install.sh` first if you prefer. It uses `cargo install --git`, so Rust/Cargo is required. Update later with:
+Review `install.sh` first if you prefer. Rust/Cargo is only required when no compatible release binary is available or when installing from a branch/revision. Update later with:
 
 ```bash
 hive update
@@ -61,4 +61,4 @@ Discovery and join only create untrusted peer candidates. Compare node IDs out-o
 e2e-tests/two-node-chat.sh
 ```
 
-See [docs/hive-cli.md](docs/hive-cli.md), [docs/architecture-v1.md](docs/architecture-v1.md) and the [two-machine v1 checklist](docs/two-machine-v1-checklist.md).
+See [docs/hive-cli.md](docs/hive-cli.md), [docs/architecture-v1.md](docs/architecture-v1.md), [docs/releases.md](docs/releases.md) and the [two-machine v1 checklist](docs/two-machine-v1-checklist.md).

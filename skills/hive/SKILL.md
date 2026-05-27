@@ -23,7 +23,7 @@ If either command is missing, install HIVEMIND with:
 curl -fsSL https://raw.githubusercontent.com/nootr/hivemind/main/install.sh | sh
 ```
 
-If installation fails because Rust/Cargo is missing, ask the user to install Rust from https://rustup.rs/ first. If the user wants to inspect the installer before running it, show them https://raw.githubusercontent.com/nootr/hivemind/main/install.sh.
+The installer prefers prebuilt release binaries and falls back to a source install. If installation fails because Rust/Cargo is missing, explain that Rust from https://rustup.rs/ is only needed for the source fallback. If the user wants to inspect the installer before running it, show them https://raw.githubusercontent.com/nootr/hivemind/main/install.sh.
 
 Initialize local node config:
 
