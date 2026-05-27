@@ -11,7 +11,7 @@ HIVEMIND_NODE_URL=http://127.0.0.1:7747
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nootr/hivemind/main/install.sh | sh
+curl -fsSL https://hivemind.jhx.app/install.sh | sh
 ```
 
 Review `install.sh` first if you prefer. On Linux and macOS it uses prebuilt release binaries when available and falls back to a source install. Rust/Cargo is only required when no compatible release binary is available or when installing from a branch/revision. Update later with:

@@ -20,10 +20,10 @@ hive update
 If either command is missing, install HIVEMIND with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nootr/hivemind/main/install.sh | sh
+curl -fsSL https://hivemind.jhx.app/install.sh | sh
 ```
 
-The installer prefers prebuilt release binaries and falls back to a source install. If installation fails because Rust/Cargo is missing, explain that Rust from https://rustup.rs/ is only needed for the source fallback. If the user wants to inspect the installer before running it, show them https://raw.githubusercontent.com/nootr/hivemind/main/install.sh.
+The installer prefers prebuilt release binaries and falls back to a source install. If installation fails because Rust/Cargo is missing, explain that Rust from https://rustup.rs/ is only needed for the source fallback. If the user wants to inspect the installer before running it, show them https://hivemind.jhx.app/install.sh.
 
 Initialize local node config:
 
