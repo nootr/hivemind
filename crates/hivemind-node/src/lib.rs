@@ -6,9 +6,9 @@ use axum::{
     Json, Router,
 };
 use hivemind_core::{valid_node_id, ChatMessage, NodeKey, PeerInfo, PeerRecord};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
     env,
     fs::{self, OpenOptions},
     io::Write,
@@ -47,6 +47,8 @@ pub enum NodeError {
     Toml(#[from] toml::de::Error),
     #[error("core error: {0}")]
     Core(#[from] hivemind_core::CoreError),
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -81,11 +83,66 @@ pub struct AppState {
     store: Arc<Store>,
 }
 
-#[derive(Default)]
 struct Store {
-    peers: Mutex<BTreeMap<String, PeerRecord>>,
-    messages: Mutex<BTreeMap<String, ChatMessage>>,
-    untrusted_notices: Mutex<BTreeSet<String>>,
+    conn: Mutex<Connection>,
+}
+
+impl Store {
+    fn open(path: &FsPath) -> Result<Self, NodeError> {
+        create_private_state_file_if_missing(path)?;
+        let conn = Connection::open(path)?;
+        migrate_store(&conn)?;
+        restrict_state_permissions(path)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    #[cfg(test)]
+    fn memory() -> Self {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        migrate_store(&conn).expect("migrate in-memory sqlite");
+        Self {
+            conn: Mutex::new(conn),
+        }
+    }
+}
+
+fn migrate_store(conn: &Connection) -> rusqlite::Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version > 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS peers (
+            node_id TEXT PRIMARY KEY NOT NULL,
+            node_url TEXT NOT NULL,
+            name TEXT,
+            last_seen_ms INTEGER NOT NULL,
+            trusted INTEGER NOT NULL,
+            source TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY NOT NULL,
+            room TEXT NOT NULL,
+            author_node_id TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            signature TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS messages_room_created_idx
+            ON messages(room, created_at_ms);
+        CREATE TABLE IF NOT EXISTS untrusted_notices (
+            node_id TEXT PRIMARY KEY NOT NULL
+        );
+        PRAGMA user_version = 1;
+        "#,
+    )
+}
+
+fn map_store_error(err: rusqlite::Error) -> ApiError {
+    ApiError::Internal(format!("sqlite: {err}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,7 +185,7 @@ fn default_room() -> String {
 pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
     fs::create_dir_all(&config.data_dir)?;
     let key = load_or_create_key(&config.data_dir.join("node.key"))?;
-    let store = Arc::new(Store::default());
+    let store = Arc::new(Store::open(&config.data_dir.join("state.sqlite3"))?);
     let state = AppState {
         key: Arc::new(key),
         bind_addr: config.bind_addr,
@@ -173,14 +230,7 @@ async fn get_peers(
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
 ) -> Result<Json<PeersResponse>, ApiError> {
-    let mut peers: Vec<PeerRecord> = state
-        .store
-        .peers
-        .lock()
-        .map_err(|_| ApiError::Internal("peer lock".to_owned()))?
-        .values()
-        .cloned()
-        .collect();
+    let mut peers = list_peers(&state)?;
     if !client_addr.ip().is_loopback() {
         for peer in &mut peers {
             peer.trusted = false;
@@ -202,15 +252,8 @@ async fn add_peer(
         return Err(ApiError::InvalidRequest);
     }
     let node_id = peer.node_id.clone();
-    remember_peer(&state, peer, "manual");
-    let peers = state
-        .store
-        .peers
-        .lock()
-        .map_err(|_| ApiError::Internal("peer lock".to_owned()))?;
-    Ok(Json(
-        peers.get(&node_id).cloned().ok_or(ApiError::NotFound)?,
-    ))
+    remember_peer(&state, peer, "manual")?;
+    Ok(Json(get_peer(&state, &node_id)?.ok_or(ApiError::NotFound)?))
 }
 
 async fn join_network(
@@ -223,15 +266,8 @@ async fn join_network(
     {
         return Err(ApiError::InvalidRequest);
     }
-    remember_peer(&state, peer, "join");
-    let mut peers: Vec<PeerRecord> = state
-        .store
-        .peers
-        .lock()
-        .map_err(|_| ApiError::Internal("peer lock".to_owned()))?
-        .values()
-        .cloned()
-        .collect();
+    remember_peer(&state, peer, "join")?;
+    let mut peers = list_peers(&state)?;
     peers.push(PeerRecord {
         node_url: state.node_url(),
         node_id: state.key.node_id(),
@@ -252,14 +288,7 @@ async fn trust_peer(
     if !valid_node_id(&node_id) {
         return Err(ApiError::InvalidRequest);
     }
-    let mut peers = state
-        .store
-        .peers
-        .lock()
-        .map_err(|_| ApiError::Internal("peer lock".to_owned()))?;
-    let peer = peers.get_mut(&node_id).ok_or(ApiError::NotFound)?;
-    peer.trusted = true;
-    Ok(Json(peer.clone()))
+    Ok(Json(trust_peer_record(&state, &node_id)?))
 }
 
 async fn say(
@@ -296,15 +325,7 @@ async fn get_messages(
 ) -> Result<Json<MessagesResponse>, ApiError> {
     require_local_client(client_addr)?;
     let after_ms = query.after_ms.unwrap_or(0);
-    let messages = state
-        .store
-        .messages
-        .lock()
-        .map_err(|_| ApiError::Internal("message lock".to_owned()))?
-        .values()
-        .filter(|message| message.room == query.room && message.created_at_ms > after_ms)
-        .cloned()
-        .collect();
+    let messages = list_messages(&state, &query.room, after_ms)?;
     Ok(Json(MessagesResponse { messages }))
 }
 
@@ -316,34 +337,138 @@ fn require_local_client(client_addr: SocketAddr) -> Result<(), ApiError> {
     }
 }
 
-fn store_message(state: &AppState, message: ChatMessage) -> Result<(), ApiError> {
-    state
+fn row_to_peer(row: &rusqlite::Row<'_>) -> rusqlite::Result<PeerRecord> {
+    Ok(PeerRecord {
+        node_id: row.get(0)?,
+        node_url: row.get(1)?,
+        name: row.get(2)?,
+        last_seen_ms: row.get::<_, i64>(3)? as u64,
+        trusted: row.get::<_, i64>(4)? != 0,
+        source: row.get(5)?,
+    })
+}
+
+fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
+    Ok(ChatMessage {
+        id: row.get(0)?,
+        room: row.get(1)?,
+        author_node_id: row.get(2)?,
+        created_at_ms: row.get::<_, i64>(3)? as u64,
+        text: row.get(4)?,
+        signature: row.get(5)?,
+    })
+}
+
+fn list_peers(state: &AppState) -> Result<Vec<PeerRecord>, ApiError> {
+    let conn = state
         .store
-        .messages
+        .conn
         .lock()
-        .map_err(|_| ApiError::Internal("message lock".to_owned()))?
-        .insert(message.id.clone(), message);
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    let mut statement = conn
+        .prepare(
+            "SELECT node_id, node_url, name, last_seen_ms, trusted, source
+             FROM peers
+             ORDER BY trusted DESC, name IS NULL, name, node_url, node_id",
+        )
+        .map_err(map_store_error)?;
+    let peers = statement
+        .query_map([], row_to_peer)
+        .map_err(map_store_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_store_error)?;
+    Ok(peers)
+}
+
+fn get_peer(state: &AppState, node_id: &str) -> Result<Option<PeerRecord>, ApiError> {
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    conn.query_row(
+        "SELECT node_id, node_url, name, last_seen_ms, trusted, source FROM peers WHERE node_id = ?1",
+        params![node_id],
+        row_to_peer,
+    )
+    .optional()
+    .map_err(map_store_error)
+}
+
+fn trust_peer_record(state: &AppState, node_id: &str) -> Result<PeerRecord, ApiError> {
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    let changed = conn
+        .execute(
+            "UPDATE peers SET trusted = 1 WHERE node_id = ?1",
+            params![node_id],
+        )
+        .map_err(map_store_error)?;
+    if changed == 0 {
+        return Err(ApiError::NotFound);
+    }
+    conn.query_row(
+        "SELECT node_id, node_url, name, last_seen_ms, trusted, source FROM peers WHERE node_id = ?1",
+        params![node_id],
+        row_to_peer,
+    )
+    .map_err(map_store_error)
+}
+
+fn list_messages(
+    state: &AppState,
+    room: &str,
+    after_ms: u64,
+) -> Result<Vec<ChatMessage>, ApiError> {
+    let after_ms = i64::try_from(after_ms).unwrap_or(i64::MAX);
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    let mut statement = conn
+        .prepare(
+            "SELECT id, room, author_node_id, created_at_ms, text, signature
+             FROM messages
+             WHERE room = ?1 AND created_at_ms > ?2
+             ORDER BY created_at_ms ASC, id ASC",
+        )
+        .map_err(map_store_error)?;
+    let messages = statement
+        .query_map(params![room, after_ms], row_to_message)
+        .map_err(map_store_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_store_error)?;
+    Ok(messages)
+}
+
+fn store_message(state: &AppState, message: ChatMessage) -> Result<(), ApiError> {
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO messages (id, room, author_node_id, created_at_ms, text, signature)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            message.id,
+            message.room,
+            message.author_node_id,
+            i64::try_from(message.created_at_ms).unwrap_or(i64::MAX),
+            message.text,
+            message.signature
+        ],
+    )
+    .map_err(map_store_error)?;
     Ok(())
 }
 
 fn store_untrusted_author_notice(state: &AppState, author_node_id: &str) -> Result<(), ApiError> {
-    let inserted = state
-        .store
-        .untrusted_notices
-        .lock()
-        .map_err(|_| ApiError::Internal("notice lock".to_owned()))?
-        .insert(author_node_id.to_owned());
-    if !inserted {
-        return Ok(());
-    }
-
-    let known_peer = state
-        .store
-        .peers
-        .lock()
-        .map_err(|_| ApiError::Internal("peer lock".to_owned()))?
-        .get(author_node_id)
-        .cloned();
+    let known_peer = get_peer(state, author_node_id)?;
     let text = if let Some(peer) = known_peer {
         format!(
             "Untrusted peer {} ({}) tried to send a chat message. The message was ignored. Verify the node ID out-of-band; if you trust it, run: hive peer trust {}",
@@ -356,7 +481,35 @@ fn store_untrusted_author_notice(state: &AppState, author_node_id: &str) -> Resu
         )
     };
     let notice = state.key.sign_chat("default", now_ms(), &text);
-    store_message(state, notice)
+    let created_at_ms = i64::try_from(notice.created_at_ms).unwrap_or(i64::MAX);
+    let mut conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    let tx = conn.transaction().map_err(map_store_error)?;
+    let changed = tx
+        .execute(
+            "INSERT OR IGNORE INTO untrusted_notices (node_id) VALUES (?1)",
+            params![author_node_id],
+        )
+        .map_err(map_store_error)?;
+    if changed > 0 {
+        tx.execute(
+            "INSERT OR IGNORE INTO messages (id, room, author_node_id, created_at_ms, text, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                notice.id,
+                notice.room,
+                notice.author_node_id,
+                created_at_ms,
+                notice.text,
+                notice.signature
+            ],
+        )
+        .map_err(map_store_error)?;
+    }
+    tx.commit().map_err(map_store_error)
 }
 
 fn spawn_discovery(bind_addr: SocketAddr, public_url: Option<String>, state: AppState) {
@@ -386,8 +539,9 @@ async fn discovery_loop(
                 let (len, peer_addr) = received?;
                 let text = String::from_utf8_lossy(&buf[..len]);
                 if let Some(peer) = parse_beacon(&text) {
-                    if peer.node_id != state.key.node_id() {
-                        remember_peer(&state, peer.clone(), "beacon");
+                    if peer.node_id != state.key.node_id()
+                        && remember_peer(&state, peer.clone(), "beacon").is_ok()
+                    {
                         tokio::spawn(fetch_peer_list(state.clone(), peer.clone()));
                     }
                 } else if text.trim() == "HIVEMIND_DISCOVER_V2" {
@@ -457,26 +611,32 @@ fn parse_beacon(input: &str) -> Option<PeerInfo> {
     }
 }
 
-fn remember_peer(state: &AppState, peer: PeerInfo, source: &str) {
+fn remember_peer(state: &AppState, peer: PeerInfo, source: &str) -> Result<(), ApiError> {
     let seen_at = now_ms();
-    let mut peers = state.store.peers.lock().expect("peer lock");
-    peers
-        .entry(peer.node_id.clone())
-        .and_modify(|existing| {
-            existing.node_url = peer.node_url.clone();
-            existing.last_seen_ms = seen_at;
-            if peer.name.is_some() {
-                existing.name = peer.name.clone();
-            }
-        })
-        .or_insert(PeerRecord {
-            node_url: peer.node_url,
-            node_id: peer.node_id,
-            name: peer.name,
-            last_seen_ms: seen_at,
-            trusted: false,
-            source: source.to_owned(),
-        });
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    conn.execute(
+        r#"
+        INSERT INTO peers (node_id, node_url, name, last_seen_ms, trusted, source)
+        VALUES (?1, ?2, ?3, ?4, 0, ?5)
+        ON CONFLICT(node_id) DO UPDATE SET
+            node_url = excluded.node_url,
+            name = COALESCE(excluded.name, peers.name),
+            last_seen_ms = excluded.last_seen_ms
+        "#,
+        params![
+            peer.node_id,
+            peer.node_url,
+            peer.name,
+            seen_at as i64,
+            source
+        ],
+    )
+    .map_err(map_store_error)?;
+    Ok(())
 }
 
 async fn fetch_peer_list(state: AppState, peer: PeerInfo) {
@@ -501,7 +661,7 @@ async fn fetch_peer_list(state: AppState, peer: PeerInfo) {
     };
     for found in peers.peers {
         if found.node_id != state.key.node_id() && found.node_id != peer.node_id {
-            remember_peer(
+            let _ = remember_peer(
                 &state,
                 PeerInfo {
                     node_url: found.node_url,
@@ -529,30 +689,32 @@ fn gossip_message(state: AppState, message: ChatMessage) {
 }
 
 fn trusted_author(state: &AppState, node_id: &str) -> bool {
-    state
-        .store
-        .peers
-        .lock()
-        .expect("peer lock")
-        .get(node_id)
+    get_peer(state, node_id)
+        .ok()
+        .flatten()
         .map(|peer| peer.trusted)
         .unwrap_or(false)
 }
 
 fn trusted_peers(state: &AppState) -> Vec<PeerRecord> {
-    state
-        .store
-        .peers
-        .lock()
-        .expect("peer lock")
-        .values()
+    list_peers(state)
+        .unwrap_or_default()
+        .into_iter()
         .filter(|peer| peer.trusted)
-        .cloned()
         .collect()
 }
 
 fn peer_count(state: &AppState) -> usize {
-    state.store.peers.lock().expect("peer lock").len()
+    state
+        .store
+        .conn
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM peers", [], |row| row.get::<_, i64>(0))
+                .ok()
+        })
+        .unwrap_or(0) as usize
 }
 
 fn inferred_node_url(bind_addr: SocketAddr, target: SocketAddr) -> String {
@@ -635,6 +797,46 @@ fn restrict_key_permissions(_path: &FsPath) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn create_private_state_file_if_missing(path: &FsPath) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_private_state_file_if_missing(path: &FsPath) -> std::io::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new().write(true).create_new(true).open(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_state_permissions(path: &FsPath) -> std::io::Result<()> {
+    restrict_key_permissions(path)
+}
+
+#[cfg(not(unix))]
+fn restrict_state_permissions(_path: &FsPath) -> std::io::Result<()> {
+    Ok(())
+}
+
 fn local_node_url(bind_addr: SocketAddr) -> String {
     format!(
         "http://{}:{}",
@@ -711,11 +913,15 @@ mod tests {
     }
 
     fn test_state() -> AppState {
+        test_state_with_store(Store::memory())
+    }
+
+    fn test_state_with_store(store: Store) -> AppState {
         AppState {
             key: Arc::new(NodeKey::from_seed_hex(&"01".repeat(32)).unwrap()),
             bind_addr: "127.0.0.1:7747".parse().unwrap(),
             public_url: Some("http://127.0.0.1:7747".to_owned()),
-            store: Arc::new(Store::default()),
+            store: Arc::new(store),
         }
     }
 
@@ -731,7 +937,7 @@ mod tests {
             key: Arc::new(NodeKey::from_seed_hex(&"01".repeat(32)).unwrap()),
             bind_addr: "127.0.0.1:18888".parse().unwrap(),
             public_url: None,
-            store: Arc::new(Store::default()),
+            store: Arc::new(Store::memory()),
         };
         assert_eq!(state.node_url(), "http://127.0.0.1:18888");
     }
@@ -784,7 +990,8 @@ mod tests {
                 name: None,
             },
             "test",
-        );
+        )
+        .unwrap();
         remember_peer(
             &state,
             PeerInfo {
@@ -793,18 +1000,95 @@ mod tests {
                 name: Some("trusted-host".to_owned()),
             },
             "test",
-        );
-        state
-            .store
-            .peers
-            .lock()
-            .unwrap()
-            .get_mut(&"c".repeat(64))
-            .unwrap()
-            .trusted = true;
+        )
+        .unwrap();
+        trust_peer_record(&state, &"c".repeat(64)).unwrap();
         let peers = trusted_peers(&state);
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].node_url, "http://trusted");
+    }
+
+    #[test]
+    fn sqlite_store_sets_user_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite3");
+        let state = test_state_with_store(Store::open(&path).unwrap());
+        let version: i64 = state
+            .store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn sqlite_store_creates_private_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite3");
+        Store::open(&path).unwrap();
+        assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn list_messages_handles_huge_after_ms() {
+        let state = test_state();
+        store_message(&state, state.key.sign_chat("default", 123, "hello")).unwrap();
+        let messages = list_messages(&state, "default", u64::MAX).unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn sqlite_store_persists_peers_and_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite3");
+        {
+            let state = test_state_with_store(Store::open(&path).unwrap());
+            remember_peer(
+                &state,
+                PeerInfo {
+                    node_url: "http://peer".to_owned(),
+                    node_id: "b".repeat(64),
+                    name: Some("peer-host".to_owned()),
+                },
+                "test",
+            )
+            .unwrap();
+            trust_peer_record(&state, &"b".repeat(64)).unwrap();
+            store_message(&state, state.key.sign_chat("default", 123, "persist me")).unwrap();
+        }
+
+        let state = test_state_with_store(Store::open(&path).unwrap());
+        let peer = get_peer(&state, &"b".repeat(64)).unwrap().unwrap();
+        assert!(peer.trusted);
+        assert_eq!(peer.name.as_deref(), Some("peer-host"));
+        let messages = list_messages(&state, "default", 0).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "persist me");
+    }
+
+    #[test]
+    fn sqlite_store_persists_untrusted_notice_dedupe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite3");
+        {
+            let state = test_state_with_store(Store::open(&path).unwrap());
+            store_untrusted_author_notice(&state, &"b".repeat(64)).unwrap();
+        }
+
+        let state = test_state_with_store(Store::open(&path).unwrap());
+        store_untrusted_author_notice(&state, &"b".repeat(64)).unwrap();
+        let messages = list_messages(&state, "default", 0).unwrap();
+        assert_eq!(messages.len(), 1);
     }
 
     #[test]
@@ -818,9 +1102,10 @@ mod tests {
                 name: Some("peer-host".to_owned()),
             },
             "test",
-        );
-        let peers = state.store.peers.lock().unwrap();
-        let peer = peers.values().next().unwrap();
+        )
+        .unwrap();
+        let peers = list_peers(&state).unwrap();
+        let peer = peers.first().unwrap();
         assert!(!peer.trusted);
         assert_eq!(peer.name.as_deref(), Some("peer-host"));
     }
@@ -889,7 +1174,8 @@ mod tests {
                 name: None,
             },
             "test",
-        );
+        )
+        .unwrap();
         let response = app(state)
             .oneshot(
                 axum::http::Request::builder()
@@ -927,9 +1213,9 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
-        let messages = state.store.messages.lock().unwrap();
+        let messages = list_messages(&state, "default", 0).unwrap();
         assert_eq!(messages.len(), 1);
-        let notice = messages.values().next().unwrap();
+        let notice = messages.first().unwrap();
         assert!(notice.text.contains("tried to send a chat message"));
         assert!(notice.text.contains(&author.node_id()));
         assert!(!notice.text.contains("secret text should not be copied"));
@@ -948,15 +1234,9 @@ mod tests {
                 name: None,
             },
             "test",
-        );
-        state
-            .store
-            .peers
-            .lock()
-            .unwrap()
-            .get_mut(&author.node_id())
-            .unwrap()
-            .trusted = true;
+        )
+        .unwrap();
+        trust_peer_record(&state, &author.node_id()).unwrap();
         let message = author.sign_chat("default", 123, "hello");
         let response = app(state)
             .oneshot(
@@ -1022,15 +1302,9 @@ mod tests {
                 name: Some("peer-host".to_owned()),
             },
             "test",
-        );
-        state
-            .store
-            .peers
-            .lock()
-            .unwrap()
-            .get_mut(&"b".repeat(64))
-            .unwrap()
-            .trusted = true;
+        )
+        .unwrap();
+        trust_peer_record(&state, &"b".repeat(64)).unwrap();
         let response = app(state)
             .oneshot(
                 axum::http::Request::builder()
@@ -1095,7 +1369,8 @@ mod tests {
                 name: None,
             },
             "test",
-        );
+        )
+        .unwrap();
         let response = app(state)
             .oneshot(
                 axum::http::Request::builder()

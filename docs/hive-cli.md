@@ -27,7 +27,7 @@ hive node init
 hive node start
 ```
 
-By default, `hive node init` binds the node to `0.0.0.0:7747` and omits `public_url`. The running node detects and advertises the current LAN URL dynamically, so moving networks does not leave a stale IP in config. Override only when detection is wrong:
+By default, `hive node init` binds the node to `0.0.0.0:7747` and omits `public_url`. The running node detects and advertises the current LAN URL dynamically, so moving networks does not leave a stale IP in config. Peers, trust and chat messages persist in `state.sqlite3` under the node data directory. Override only when detection is wrong:
 
 ```bash
 hive node init --public-url http://192.168.1.42:7747 --force
