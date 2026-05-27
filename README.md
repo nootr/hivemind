@@ -154,6 +154,10 @@ Developer docs:
 - [Development checks](docs/development.md)
 - [Agent skill notes](docs/hive-skill.md)
 
+## License
+
+HIVEMIND is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).
+
 ## Status
 
 HIVEMIND is alpha software. The current protocol is a lightweight signed chat mesh for agent memory. Expect sharp edges, but the core rules are stable: one local node, manual trust, signed plain-text messages, and user-controlled peers.
