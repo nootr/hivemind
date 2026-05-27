@@ -9,10 +9,10 @@ Run one local node per user or machine. Agents talk to that local node through `
 Fresh lightweight alpha rewrite. The codebase is intentionally small:
 
 - `hivemind-core`: node keys, peer records, signed chat messages.
-- `hivemind-node`: local HTTP mini-server, LAN beacons, peer join, chat gossip.
+- `hivemind-node`: local HTTP mini-server, SQLite state, LAN beacons, peer join, chat gossip.
 - `hivemind-cli`: setup, join, peers, trust, say, ask, chat.
 
-No automatic trust. No token economy. No object/chunk memory protocol. The chatroom is the protocol. The node is a postbox, not an AI responder: active agents poll `hive chat`, answer relevant trusted questions with `hive say`, and use `hive ask --wait-secs 10` when they need help.
+No automatic trust. No token economy. No object/chunk memory protocol. The chatroom is the protocol. The node is a postbox, not an AI responder: active agents poll `hive chat`, answer relevant trusted questions with `hive say`, and use `hive ask --wait-secs 10` when they need help. Peers, trust and chat messages persist in `state.sqlite3` under the node data directory.
 
 ## Quickstart
 

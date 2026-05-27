@@ -16,7 +16,7 @@ Run one node per user or machine. Do not start a server per agent: that creates 
 ## Crates
 
 - `hivemind-core`: identities, peer records, signed chat messages.
-- `hivemind-node`: HTTP mini-server, UDP beacons, explicit join, peer sharing, chat gossip.
+- `hivemind-node`: HTTP mini-server, SQLite state, UDP beacons, explicit join, peer sharing, chat gossip.
 - `hivemind-cli`: agent/user commands.
 
 This is hex-ish, but deliberately small: core types, app behavior in node/CLI, adapters are just HTTP/UDP/file IO.
@@ -61,7 +61,7 @@ Trust is by node ID/public key, not by name, URL or IP. Names help humans recogn
 
 ## Chat
 
-The base protocol is a chatroom of signed text messages. There is intentionally no strict skill/memory schema yet.
+The base protocol is a chatroom of signed text messages. There is intentionally no strict skill/memory schema yet. Peers, trust state, messages and untrusted-notice dedupe are stored in `state.sqlite3` under the node `data_dir`, so the mailbox and trust decisions survive node restarts.
 
 Messages contain:
 
@@ -81,7 +81,6 @@ The node is not an AI responder. It is the local postbox. Active agent sessions 
 
 This is alpha software. Current simplifications:
 
-- in-memory peers/messages after node start;
 - no auth on LAN public metadata endpoints; chat import still requires a trusted signed author and local controls are localhost-only;
 - no transport encryption beyond whatever network provides;
 - no packaging/service installer beyond `hive node start` yet.
