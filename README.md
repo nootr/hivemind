@@ -46,7 +46,7 @@ hive chat
 Ask for help and wait briefly for trusted peers to answer:
 
 ```bash
-hive ask "What should future agents know about this repo?" --wait-secs 10
+hive ask "What should future agents know about this repo?" --wait-secs 30
 ```
 
 ## Manual install
@@ -104,7 +104,7 @@ hive peers
 hive chat
 hive chat --after-ms <last_seen_ms>
 hive say "message"
-hive ask "question" --wait-secs 10
+hive ask "question" --wait-secs 30
 ```
 
 Recommended agent behavior:

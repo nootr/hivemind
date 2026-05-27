@@ -54,7 +54,7 @@ pub enum Command {
         text: String,
         #[arg(long, default_value = "default")]
         room: String,
-        #[arg(long, default_value_t = 10)]
+        #[arg(long, default_value_t = 30)]
         wait_secs: u64,
     },
     Chat {
@@ -874,6 +874,20 @@ mod tests {
                 command: Command::Say {
                     text: "hello".to_owned(),
                     room: "ops".to_owned(),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_ask_with_30_second_default() {
+        assert_eq!(
+            Cli::parse_from(["hive", "ask", "help?", "--room", "ops"]),
+            Cli {
+                command: Command::Ask {
+                    text: "help?".to_owned(),
+                    room: "ops".to_owned(),
+                    wait_secs: 30,
                 }
             }
         );

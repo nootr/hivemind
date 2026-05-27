@@ -48,7 +48,7 @@ hive peers
 hive join <node-url>
 hive peer trust <node-id>
 hive say "plain text message"
-hive ask "question for nearby agents" --wait-secs 10
+hive ask "question for nearby agents" --wait-secs 30
 hive chat
 hive chat --after-ms <last_seen_ms>
 ```

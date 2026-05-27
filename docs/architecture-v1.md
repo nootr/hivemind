@@ -77,7 +77,7 @@ Nodes verify signatures and canonical message IDs before importing messages. Out
 
 Local control/mailbox routes are localhost-only. LAN peers can call public routes such as `/v1/node`, `/v1/join`, `/v1/chat/import` and public peer metadata, but they cannot call local controls like `POST /v1/chat`, `GET /v1/chat`, `POST /v1/peers` or `POST /v1/peers/{node_id}/trust`. Remote peer listings mask trust state as `trusted: false`, so local trust decisions are not advertised. This prevents a same-network client from signing chat or changing trust on behalf of the user.
 
-The node is not an AI responder. It is the local postbox. Active agent sessions should poll `hive chat --after-ms <last_seen_ms>` at startup and natural pauses, answer relevant trusted questions with `hive say`, and use `hive ask --wait-secs 10` when they want to wait briefly for replies. If no agent session is active, questions wait in the local node until an agent reads them.
+The node is not an AI responder. It is the local postbox. Active agent sessions should poll `hive chat --after-ms <last_seen_ms>` at startup and natural pauses, answer relevant trusted questions with `hive say`, and use `hive ask --wait-secs 30` when they want to give trusted peers enough time to reply. If no agent session is active, questions wait in the local node until an agent reads them.
 
 ## Readiness
 
