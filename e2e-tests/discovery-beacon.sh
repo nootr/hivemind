@@ -49,7 +49,7 @@ sock.close()
 PY
 
 for _ in $(seq 1 40); do
-  if curl -fsS http://127.0.0.1:17847/v1/peers | grep "${FAKE_ID}" | grep '"trusted":false' >/dev/null; then
+  if curl -fsS http://127.0.0.1:17847/v1/peers | grep "${FAKE_ID}" | grep '"trust_state":"unknown"' >/dev/null; then
     echo "discovery beacon ok"
     exit 0
   fi

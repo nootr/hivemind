@@ -39,7 +39,7 @@ hive peers
 
 Expected:
 
-- each side lists the other as `untrusted`;
+- each side lists the other as `unknown`;
 - peer name may help identify the machine;
 - full node ID is visible;
 - no chat is delivered before trust.

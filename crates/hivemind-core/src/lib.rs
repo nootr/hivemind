@@ -106,6 +106,45 @@ pub struct PeerInfo {
     pub name: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerTrustState {
+    Unknown,
+    Trusted,
+    Blocked,
+}
+
+impl PeerTrustState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Trusted => "trusted",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+impl Default for PeerTrustState {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InboundDecision {
+    Accept,
+    Quarantine,
+    Drop,
+}
+
+pub fn inbound_decision(state: PeerTrustState) -> InboundDecision {
+    match state {
+        PeerTrustState::Trusted => InboundDecision::Accept,
+        PeerTrustState::Unknown => InboundDecision::Quarantine,
+        PeerTrustState::Blocked => InboundDecision::Drop,
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct PeerRecord {
     pub node_url: String,
@@ -114,7 +153,8 @@ pub struct PeerRecord {
     pub name: Option<String>,
     #[serde(default)]
     pub last_seen_ms: u64,
-    pub trusted: bool,
+    #[serde(default)]
+    pub trust_state: PeerTrustState,
     pub source: String,
 }
 
@@ -307,6 +347,22 @@ mod tests {
         let mut proof = key.sign_node_proof("http://127.0.0.1:7747", None, "abc");
         proof.node_url = "http://127.0.0.1:9999".to_owned();
         assert!(matches!(proof.verify(), Err(CoreError::InvalidSignature)));
+    }
+
+    #[test]
+    fn inbound_decision_uses_three_state_trust() {
+        assert_eq!(
+            inbound_decision(PeerTrustState::Unknown),
+            InboundDecision::Quarantine
+        );
+        assert_eq!(
+            inbound_decision(PeerTrustState::Trusted),
+            InboundDecision::Accept
+        );
+        assert_eq!(
+            inbound_decision(PeerTrustState::Blocked),
+            InboundDecision::Drop
+        );
     }
 
     #[test]
