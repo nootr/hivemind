@@ -47,6 +47,7 @@ hive setup
 hive peers
 hive join <node-url>
 hive peer trust <node-id>
+hive peer deny <node-id>
 hive say "plain text message"
 hive ask "question for nearby agents" --wait-secs 30
 hive chat
@@ -98,7 +99,7 @@ Shows local control URL, advertised node URL, node name, node ID, discovered pee
 
 ### `hive join <node-url>`
 
-Fallback for networks where UDP discovery does not work. Joins a peer network explicitly. Both sides store each other as untrusted peer candidates and share known public peer metadata.
+Fallback for networks where UDP discovery does not work. Joins a peer network explicitly. Both sides store each other as unknown peer candidates and share known public peer metadata.
 
 ### `hive peers`
 
@@ -106,7 +107,11 @@ Lists candidates with trust state, optional peer name, URL, short fingerprint, f
 
 ### `hive peer trust <node-id>`
 
-Marks a known peer trusted by node ID/public key. Never trust by name, URL or IP; those are only recognition hints.
+Marks a known peer trusted by node ID/public key and releases any quarantined messages from that node. Never trust by name, URL or IP; those are only recognition hints.
+
+### `hive peer deny <node-id>`
+
+Marks a node blocked by node ID/public key and deletes any quarantined messages from that node. Future messages from that node are dropped.
 
 ### `hive say`
 

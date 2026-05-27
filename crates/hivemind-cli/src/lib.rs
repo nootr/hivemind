@@ -104,6 +104,7 @@ pub enum NodeCommand {
 #[derive(Debug, Subcommand, Eq, PartialEq)]
 pub enum PeerCommand {
     Trust { node_id: String },
+    Deny { node_id: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -186,6 +187,7 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
         Command::Join { node_url } => join(client, &node_url).await,
         Command::Peer { command } => match command {
             PeerCommand::Trust { node_id } => trust_peer(client, &node_id).await,
+            PeerCommand::Deny { node_id } => deny_peer(client, &node_id).await,
         },
         Command::Say { text, room } => say(client, &text, &room).await,
         Command::Ask {
@@ -586,8 +588,7 @@ async fn setup(client: &reqwest::Client) -> Result<String, CliError> {
     } else {
         lines.push("Discovered peer candidates:".to_owned());
         for peer in peers {
-            let status = if peer.trusted { "trusted" } else { "untrusted" };
-            lines.push(format_peer_line(&peer, status));
+            lines.push(format_peer_line(&peer));
         }
     }
     lines.push("".to_owned());
@@ -628,7 +629,7 @@ async fn join(client: &reqwest::Client, remote_node_url: &str) -> Result<String,
         }
     }
     Ok(format!(
-        "joined peer network via {remote_url}; imported {joined} untrusted peer candidates"
+        "joined peer network via {remote_url}; imported {joined} unknown peer candidates"
     ))
 }
 
@@ -639,20 +640,30 @@ async fn peers(client: &reqwest::Client) -> Result<String, CliError> {
     }
     Ok(peers
         .into_iter()
-        .map(|peer| {
-            let status = if peer.trusted { "trusted" } else { "untrusted" };
-            format_peer_line(&peer, status)
-        })
+        .map(|peer| format_peer_line(&peer))
         .collect::<Vec<_>>()
         .join("\n"))
 }
 
 async fn trust_peer(client: &reqwest::Client, node_id: &str) -> Result<String, CliError> {
+    update_peer_state(client, node_id, "trust", "trusted").await
+}
+
+async fn deny_peer(client: &reqwest::Client, node_id: &str) -> Result<String, CliError> {
+    update_peer_state(client, node_id, "deny", "blocked").await
+}
+
+async fn update_peer_state(
+    client: &reqwest::Client,
+    node_id: &str,
+    route: &str,
+    label: &str,
+) -> Result<String, CliError> {
     if !valid_node_id(node_id) {
         return Err(CliError::InvalidNodeId);
     }
     let response = client
-        .post(format!("{}/v1/peers/{node_id}/trust", node_url()))
+        .post(format!("{}/v1/peers/{node_id}/{route}", node_url()))
         .send()
         .await?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -660,9 +671,9 @@ async fn trust_peer(client: &reqwest::Client, node_id: &str) -> Result<String, C
     }
     let peer = response.error_for_status()?.json::<PeerRecord>().await?;
     Ok(format!(
-        "trusted {} {} ({})",
+        "{label} {} {} ({})",
         peer.name.as_deref().unwrap_or("unknown"),
-        peer.node_url,
+        peer_url_label(&peer),
         peer.node_id
     ))
 }
@@ -760,17 +771,17 @@ async fn author_trust(client: &reqwest::Client) -> Result<BTreeMap<String, Strin
     let node = node_info(client).await?;
     authors.insert(node.node_id, "self".to_owned());
     for peer in fetch_peers(client).await?.peers {
-        let label = if peer.trusted { "trusted" } else { "untrusted" };
-        authors.insert(peer.node_id, label.to_owned());
+        authors.insert(peer.node_id, peer.trust_state.as_str().to_owned());
     }
     Ok(authors)
 }
 
-fn format_peer_line(peer: &PeerRecord, status: &str) -> String {
+fn format_peer_line(peer: &PeerRecord) -> String {
     format!(
-        "{status}\tname={}\turl={}\tshort={}\tnode_id={}\tsource={}\tlast_seen_ms={}",
+        "{}\tname={}\turl={}\tshort={}\tnode_id={}\tsource={}\tlast_seen_ms={}",
+        peer.trust_state.as_str(),
         peer.name.as_deref().unwrap_or("unknown"),
-        peer.node_url,
+        peer_url_label(peer),
         short_id(&peer.node_id),
         peer.node_id,
         peer.source,
@@ -778,11 +789,19 @@ fn format_peer_line(peer: &PeerRecord, status: &str) -> String {
     )
 }
 
+fn peer_url_label(peer: &PeerRecord) -> &str {
+    if peer.node_url.is_empty() {
+        "unknown"
+    } else {
+        &peer.node_url
+    }
+}
+
 fn format_message(message: &ChatMessage, authors: &BTreeMap<String, String>) -> String {
     let label = authors
         .get(&message.author_node_id)
         .map(String::as_str)
-        .unwrap_or("untrusted");
+        .unwrap_or("unknown");
     format!(
         "[{}] {}: {}",
         label,
@@ -1055,6 +1074,20 @@ mod tests {
             Cli {
                 command: Command::Peer {
                     command: PeerCommand::Trust {
+                        node_id: "a".repeat(64),
+                    }
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_peer_deny() {
+        assert_eq!(
+            Cli::parse_from(["hive", "peer", "deny", &"a".repeat(64)]),
+            Cli {
+                command: Command::Peer {
+                    command: PeerCommand::Deny {
                         node_id: "a".repeat(64),
                     }
                 }

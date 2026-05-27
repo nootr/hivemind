@@ -49,12 +49,12 @@ done
 HIVEMIND_NODE_URL=http://127.0.0.1:17747 cargo run --quiet -p hivemind-cli -- join http://127.0.0.1:17748 >/dev/null
 curl -fsS http://127.0.0.1:17747/v1/peers | grep 17748 >/dev/null
 curl -fsS http://127.0.0.1:17748/v1/peers | grep 17747 >/dev/null
-curl -fsS http://127.0.0.1:17747/v1/peers | grep '"trusted":false' >/dev/null
+curl -fsS http://127.0.0.1:17747/v1/peers | grep '"trust_state":"unknown"' >/dev/null
 
-HIVEMIND_NODE_URL=http://127.0.0.1:17747 cargo run --quiet -p hivemind-cli -- say "untrusted route should not receive this" >/dev/null
+HIVEMIND_NODE_URL=http://127.0.0.1:17747 cargo run --quiet -p hivemind-cli -- say "unknown route should not receive this" >/dev/null
 sleep 0.5
-if HIVEMIND_NODE_URL=http://127.0.0.1:17748 cargo run --quiet -p hivemind-cli -- chat | grep "untrusted route should not receive this" >/dev/null; then
-  echo "untrusted peer received chat before trust" >&2
+if HIVEMIND_NODE_URL=http://127.0.0.1:17748 cargo run --quiet -p hivemind-cli -- chat | grep "unknown route should not receive this" >/dev/null; then
+  echo "unknown peer received chat before trust" >&2
   exit 1
 fi
 

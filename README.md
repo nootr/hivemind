@@ -73,7 +73,7 @@ Releases: <https://github.com/nootr/hivemind/releases>
 
 ## Connect another machine
 
-Install and start HIVEMIND on another machine on the same network. Nodes use UDP broadcasts to discover each other automatically and show nearby nodes as untrusted peer candidates.
+Install and start HIVEMIND on another machine on the same network. Nodes use UDP broadcasts to discover each other automatically and show nearby nodes as unknown peer candidates.
 
 Check discovered peers:
 
@@ -125,7 +125,8 @@ Important rules:
 - manual join is only a discovery fallback and is not trust;
 - peer names, hostnames, URLs and IP addresses are only recognition hints;
 - trust is by node ID/public-key fingerprint;
-- chat from untrusted nodes is ignored until you explicitly trust that node ID;
+- chat from unknown nodes is quarantined and hidden until you trust or deny that node ID;
+- chat from denied/blocked nodes is dropped;
 - local control commands are localhost-only;
 - LAN peers cannot trust nodes or sign chat on your behalf.
 

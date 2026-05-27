@@ -11,7 +11,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use hivemind_core::{valid_node_id, ChatMessage, NodeKey, NodeProof, PeerInfo, PeerRecord};
+use hivemind_core::{
+    inbound_decision, valid_node_id, ChatMessage, InboundDecision, NodeKey, NodeProof, PeerInfo,
+    PeerRecord, PeerTrustState,
+};
 use net::{inferred_node_url, local_node_url, normalized_node_url, valid_node_url};
 use rusqlite::{params, Connection, OptionalExtension};
 use secret_file::{
@@ -108,7 +111,7 @@ impl Store {
 
 fn migrate_store(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version > 1 {
+    if version > 2 {
         return Err(rusqlite::Error::InvalidQuery);
     }
     conn.execute_batch(
@@ -119,6 +122,7 @@ fn migrate_store(conn: &Connection) -> rusqlite::Result<()> {
             name TEXT,
             last_seen_ms INTEGER NOT NULL,
             trusted INTEGER NOT NULL,
+            trust_state TEXT NOT NULL DEFAULT 'unknown',
             source TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS messages (
@@ -131,12 +135,38 @@ fn migrate_store(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS messages_room_created_idx
             ON messages(room, created_at_ms);
+        CREATE TABLE IF NOT EXISTS quarantine_messages (
+            id TEXT PRIMARY KEY NOT NULL,
+            room TEXT NOT NULL,
+            author_node_id TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            signature TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS quarantine_author_created_idx
+            ON quarantine_messages(author_node_id, created_at_ms);
         CREATE TABLE IF NOT EXISTS untrusted_notices (
             node_id TEXT PRIMARY KEY NOT NULL
         );
-        PRAGMA user_version = 1;
         "#,
-    )
+    )?;
+    if version < 2 && !column_exists(conn, "peers", "trust_state")? {
+        conn.execute_batch(
+            r#"
+            ALTER TABLE peers ADD COLUMN trust_state TEXT NOT NULL DEFAULT 'unknown';
+            UPDATE peers SET trust_state = CASE WHEN trusted != 0 THEN 'trusted' ELSE 'unknown' END;
+            "#,
+        )?;
+    }
+    conn.execute_batch("PRAGMA user_version = 2;")
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns.iter().any(|name| name == column))
 }
 
 fn map_store_error(err: rusqlite::Error) -> ApiError {
@@ -217,6 +247,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/peers", get(get_peers).post(add_peer))
         .route("/v1/join", post(join_network))
         .route("/v1/peers/{node_id}/trust", post(trust_peer))
+        .route("/v1/peers/{node_id}/deny", post(deny_peer))
         .route("/v1/chat", get(get_messages).post(say))
         .route("/v1/chat/import", post(import_message))
         .with_state(state)
@@ -251,7 +282,7 @@ async fn get_peers(
     let mut peers = list_peers(&state)?;
     if !client_addr.ip().is_loopback() {
         for peer in &mut peers {
-            peer.trusted = false;
+            peer.trust_state = PeerTrustState::Unknown;
         }
     }
     Ok(Json(PeersResponse { peers }))
@@ -285,7 +316,7 @@ async fn join_network(
         node_id: state.key.node_id(),
         name: local_node_name(),
         last_seen_ms: now_ms(),
-        trusted: false,
+        trust_state: PeerTrustState::Unknown,
         source: "self".to_owned(),
     });
     Ok(Json(PeersResponse { peers }))
@@ -301,6 +332,18 @@ async fn trust_peer(
         return Err(ApiError::InvalidRequest);
     }
     Ok(Json(trust_peer_record(&state, &node_id)?))
+}
+
+async fn deny_peer(
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<Json<PeerRecord>, ApiError> {
+    require_local_client(client_addr)?;
+    if !valid_node_id(&node_id) {
+        return Err(ApiError::InvalidRequest);
+    }
+    Ok(Json(block_peer_record(&state, &node_id)?))
 }
 
 async fn say(
@@ -326,11 +369,17 @@ async fn import_message(
         return Err(ApiError::InvalidRequest);
     }
     message.verify().map_err(|_| ApiError::InvalidRequest)?;
-    if message.author_node_id != state.key.node_id()
-        && !trusted_author(&state, &message.author_node_id)
-    {
-        store_untrusted_author_notice(&state, &message.author_node_id)?;
-        return Err(ApiError::Forbidden);
+    if message.author_node_id != state.key.node_id() {
+        match inbound_decision(peer_trust_state(&state, &message.author_node_id)) {
+            InboundDecision::Accept => {}
+            InboundDecision::Quarantine => {
+                remember_unknown_author(&state, &message.author_node_id)?;
+                store_quarantine_message(&state, message.clone())?;
+                store_unknown_author_notice(&state, &message.author_node_id)?;
+                return Err(ApiError::Forbidden);
+            }
+            InboundDecision::Drop => return Err(ApiError::Forbidden),
+        }
     }
     store_message(&state, message.clone())?;
     Ok(Json(message))
@@ -364,9 +413,18 @@ fn row_to_peer(row: &rusqlite::Row<'_>) -> rusqlite::Result<PeerRecord> {
         node_url: row.get(1)?,
         name: row.get(2)?,
         last_seen_ms: row.get::<_, i64>(3)? as u64,
-        trusted: row.get::<_, i64>(4)? != 0,
+        trust_state: trust_state_from_db(&row.get::<_, String>(4)?)?,
         source: row.get(5)?,
     })
+}
+
+fn trust_state_from_db(input: &str) -> rusqlite::Result<PeerTrustState> {
+    match input {
+        "unknown" => Ok(PeerTrustState::Unknown),
+        "trusted" => Ok(PeerTrustState::Trusted),
+        "blocked" => Ok(PeerTrustState::Blocked),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
 }
 
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
@@ -388,9 +446,10 @@ fn list_peers(state: &AppState) -> Result<Vec<PeerRecord>, ApiError> {
         .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
     let mut statement = conn
         .prepare(
-            "SELECT node_id, node_url, name, last_seen_ms, trusted, source
+            "SELECT node_id, node_url, name, last_seen_ms, trust_state, source
              FROM peers
-             ORDER BY trusted DESC, name IS NULL, name, node_url, node_id",
+             ORDER BY CASE trust_state WHEN 'trusted' THEN 0 WHEN 'unknown' THEN 1 ELSE 2 END,
+                      name IS NULL, name, node_url, node_id",
         )
         .map_err(map_store_error)?;
     let peers = statement
@@ -408,7 +467,7 @@ fn get_peer(state: &AppState, node_id: &str) -> Result<Option<PeerRecord>, ApiEr
         .lock()
         .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
     conn.query_row(
-        "SELECT node_id, node_url, name, last_seen_ms, trusted, source FROM peers WHERE node_id = ?1",
+        "SELECT node_id, node_url, name, last_seen_ms, trust_state, source FROM peers WHERE node_id = ?1",
         params![node_id],
         row_to_peer,
     )
@@ -417,26 +476,89 @@ fn get_peer(state: &AppState, node_id: &str) -> Result<Option<PeerRecord>, ApiEr
 }
 
 fn trust_peer_record(state: &AppState, node_id: &str) -> Result<PeerRecord, ApiError> {
-    let conn = state
+    let mut conn = state
         .store
         .conn
         .lock()
         .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
-    let changed = conn
+    let tx = conn.transaction().map_err(map_store_error)?;
+    let changed = tx
         .execute(
-            "UPDATE peers SET trusted = 1 WHERE node_id = ?1",
+            "UPDATE peers SET trusted = 1, trust_state = 'trusted' WHERE node_id = ?1",
             params![node_id],
         )
         .map_err(map_store_error)?;
     if changed == 0 {
         return Err(ApiError::NotFound);
     }
-    conn.query_row(
-        "SELECT node_id, node_url, name, last_seen_ms, trusted, source FROM peers WHERE node_id = ?1",
+    tx.execute(
+        "INSERT OR IGNORE INTO messages (id, room, author_node_id, created_at_ms, text, signature)
+         SELECT id, room, author_node_id, created_at_ms, text, signature
+         FROM quarantine_messages
+         WHERE author_node_id = ?1",
         params![node_id],
-        row_to_peer,
     )
-    .map_err(map_store_error)
+    .map_err(map_store_error)?;
+    tx.execute(
+        "DELETE FROM quarantine_messages WHERE author_node_id = ?1",
+        params![node_id],
+    )
+    .map_err(map_store_error)?;
+    tx.execute(
+        "DELETE FROM untrusted_notices WHERE node_id = ?1",
+        params![node_id],
+    )
+    .map_err(map_store_error)?;
+    let peer = tx
+        .query_row(
+            "SELECT node_id, node_url, name, last_seen_ms, trust_state, source FROM peers WHERE node_id = ?1",
+            params![node_id],
+            row_to_peer,
+        )
+        .map_err(map_store_error)?;
+    tx.commit().map_err(map_store_error)?;
+    Ok(peer)
+}
+
+fn block_peer_record(state: &AppState, node_id: &str) -> Result<PeerRecord, ApiError> {
+    let mut conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    let tx = conn.transaction().map_err(map_store_error)?;
+    tx.execute(
+        r#"
+        INSERT INTO peers (node_id, node_url, name, last_seen_ms, trusted, trust_state, source)
+        VALUES (?1, '', NULL, ?2, 0, 'blocked', 'denied')
+        ON CONFLICT(node_id) DO UPDATE SET
+            trusted = 0,
+            trust_state = 'blocked',
+            last_seen_ms = excluded.last_seen_ms,
+            source = 'denied'
+        "#,
+        params![node_id, i64::try_from(now_ms()).unwrap_or(i64::MAX)],
+    )
+    .map_err(map_store_error)?;
+    tx.execute(
+        "DELETE FROM quarantine_messages WHERE author_node_id = ?1",
+        params![node_id],
+    )
+    .map_err(map_store_error)?;
+    tx.execute(
+        "DELETE FROM untrusted_notices WHERE node_id = ?1",
+        params![node_id],
+    )
+    .map_err(map_store_error)?;
+    let peer = tx
+        .query_row(
+            "SELECT node_id, node_url, name, last_seen_ms, trust_state, source FROM peers WHERE node_id = ?1",
+            params![node_id],
+            row_to_peer,
+        )
+        .map_err(map_store_error)?;
+    tx.commit().map_err(map_store_error)?;
+    Ok(peer)
 }
 
 fn list_messages(
@@ -466,6 +588,32 @@ fn list_messages(
     Ok(messages)
 }
 
+#[cfg(test)]
+fn list_quarantine_messages(
+    state: &AppState,
+    author_node_id: &str,
+) -> Result<Vec<ChatMessage>, ApiError> {
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    let mut statement = conn
+        .prepare(
+            "SELECT id, room, author_node_id, created_at_ms, text, signature
+             FROM quarantine_messages
+             WHERE author_node_id = ?1
+             ORDER BY created_at_ms ASC, id ASC",
+        )
+        .map_err(map_store_error)?;
+    let messages = statement
+        .query_map(params![author_node_id], row_to_message)
+        .map_err(map_store_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_store_error)?;
+    Ok(messages)
+}
+
 fn store_message(state: &AppState, message: ChatMessage) -> Result<(), ApiError> {
     let conn = state
         .store
@@ -488,17 +636,57 @@ fn store_message(state: &AppState, message: ChatMessage) -> Result<(), ApiError>
     Ok(())
 }
 
-fn store_untrusted_author_notice(state: &AppState, author_node_id: &str) -> Result<(), ApiError> {
+fn store_quarantine_message(state: &AppState, message: ChatMessage) -> Result<(), ApiError> {
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO quarantine_messages (id, room, author_node_id, created_at_ms, text, signature)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            message.id,
+            message.room,
+            message.author_node_id,
+            i64::try_from(message.created_at_ms).unwrap_or(i64::MAX),
+            message.text,
+            message.signature
+        ],
+    )
+    .map_err(map_store_error)?;
+    Ok(())
+}
+
+fn remember_unknown_author(state: &AppState, author_node_id: &str) -> Result<(), ApiError> {
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    conn.execute(
+        r#"
+        INSERT INTO peers (node_id, node_url, name, last_seen_ms, trusted, trust_state, source)
+        VALUES (?1, '', NULL, ?2, 0, 'unknown', 'message')
+        ON CONFLICT(node_id) DO UPDATE SET last_seen_ms = excluded.last_seen_ms
+        "#,
+        params![author_node_id, i64::try_from(now_ms()).unwrap_or(i64::MAX)],
+    )
+    .map_err(map_store_error)?;
+    Ok(())
+}
+
+fn store_unknown_author_notice(state: &AppState, author_node_id: &str) -> Result<(), ApiError> {
     let known_peer = get_peer(state, author_node_id)?;
-    let text = if let Some(peer) = known_peer {
+    let text = if let Some(peer) = known_peer.filter(|peer| !peer.node_url.is_empty()) {
         format!(
-            "Untrusted peer {} ({}) tried to send a chat message. The message was ignored. Verify the node ID out-of-band; if you trust it, run: hive peer trust {}",
-            short_node_id(author_node_id), peer.node_url, author_node_id
+            "Unknown peer {} ({}) sent a chat message. The content is quarantined and hidden. Verify the node ID out-of-band; then ask the user whether to run `hive peer trust {}` or `hive peer deny {}`.",
+            short_node_id(author_node_id), peer.node_url, author_node_id, author_node_id
         )
     } else {
         format!(
-            "Unknown untrusted node {} tried to send a chat message. The message was ignored. Join and verify the peer out-of-band before trusting node ID {}.",
-            short_node_id(author_node_id), author_node_id
+            "Unknown node {} sent a chat message. The content is quarantined and hidden. Verify the node ID out-of-band; then ask the user whether to run `hive peer trust {}` or `hive peer deny {}`.",
+            short_node_id(author_node_id), author_node_id, author_node_id
         )
     };
     let notice = state.key.sign_chat("default", now_ms(), &text);
@@ -561,7 +749,7 @@ async fn discovery_loop(
                 let text = String::from_utf8_lossy(&buf[..len]);
                 if let Some(peer) = parse_beacon(&text) {
                     if peer.node_id != state.key.node_id() {
-                        if trusted_author(&state, &peer.node_id) {
+                        if peer_trust_state(&state, &peer.node_id) == PeerTrustState::Trusted {
                             tokio::spawn(verify_and_remember_peer(state.clone(), peer.clone(), "beacon"));
                         } else if remember_peer(&state, peer.clone(), "beacon").is_ok() {
                             tokio::spawn(fetch_peer_list(state.clone(), peer.clone()));
@@ -659,9 +847,9 @@ fn upsert_peer(
         .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
     let existing = conn
         .query_row(
-            "SELECT trusted FROM peers WHERE node_id = ?1",
+            "SELECT trust_state FROM peers WHERE node_id = ?1",
             params![peer.node_id],
-            |row| row.get::<_, i64>(0),
+            |row| row.get::<_, String>(0),
         )
         .optional()
         .map_err(map_store_error)?;
@@ -670,20 +858,20 @@ fn upsert_peer(
     }
     conn.execute(
         r#"
-        INSERT INTO peers (node_id, node_url, name, last_seen_ms, trusted, source)
-        VALUES (?1, ?2, ?3, ?4, 0, ?5)
+        INSERT INTO peers (node_id, node_url, name, last_seen_ms, trusted, trust_state, source)
+        VALUES (?1, ?2, ?3, ?4, 0, 'unknown', ?5)
         ON CONFLICT(node_id) DO UPDATE SET
             node_url = CASE
-                WHEN peers.trusted = 0 OR ?6 THEN excluded.node_url
+                WHEN peers.trust_state = 'unknown' OR (peers.trust_state = 'trusted' AND ?6) THEN excluded.node_url
                 ELSE peers.node_url
             END,
             name = CASE
-                WHEN peers.trusted = 0 OR ?6 THEN COALESCE(excluded.name, peers.name)
+                WHEN peers.trust_state = 'unknown' OR (peers.trust_state = 'trusted' AND ?6) THEN COALESCE(excluded.name, peers.name)
                 ELSE peers.name
             END,
             last_seen_ms = excluded.last_seen_ms,
             source = CASE
-                WHEN peers.trusted = 0 OR ?6 THEN excluded.source
+                WHEN peers.trust_state = 'unknown' OR (peers.trust_state = 'trusted' AND ?6) THEN excluded.source
                 ELSE peers.source
             END
         "#,
@@ -796,19 +984,19 @@ fn gossip_message(state: AppState, message: ChatMessage) {
     });
 }
 
-fn trusted_author(state: &AppState, node_id: &str) -> bool {
+fn peer_trust_state(state: &AppState, node_id: &str) -> PeerTrustState {
     get_peer(state, node_id)
         .ok()
         .flatten()
-        .map(|peer| peer.trusted)
-        .unwrap_or(false)
+        .map(|peer| peer.trust_state)
+        .unwrap_or(PeerTrustState::Unknown)
 }
 
 fn trusted_peers(state: &AppState) -> Vec<PeerRecord> {
     list_peers(state)
         .unwrap_or_default()
         .into_iter()
-        .filter(|peer| peer.trusted)
+        .filter(|peer| peer.trust_state == PeerTrustState::Trusted)
         .collect()
 }
 
@@ -1074,7 +1262,7 @@ mod tests {
         assert_eq!(peer.node_url, "http://trusted.example:7747");
         assert_eq!(peer.name.as_deref(), Some("real-host"));
         assert_eq!(peer.source, "test");
-        assert!(peer.trusted);
+        assert_eq!(peer.trust_state, PeerTrustState::Trusted);
     }
 
     #[test]
@@ -1125,7 +1313,7 @@ mod tests {
         assert_eq!(peer.node_url, "http://new.example:7747");
         assert_eq!(peer.name.as_deref(), Some("signed-host"));
         assert_eq!(peer.source, "verified");
-        assert!(peer.trusted);
+        assert_eq!(peer.trust_state, PeerTrustState::Trusted);
     }
 
     #[test]
@@ -1159,7 +1347,7 @@ mod tests {
         assert_eq!(peer.node_url, "http://new.example:7747");
         assert_eq!(peer.name.as_deref(), Some("new-host"));
         assert_eq!(peer.source, "verified");
-        assert!(peer.trusted);
+        assert_eq!(peer.trust_state, PeerTrustState::Trusted);
     }
 
     #[test]
@@ -1194,7 +1382,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -1243,7 +1431,7 @@ mod tests {
 
         let state = test_state_with_store(Store::open(&path).unwrap());
         let peer = get_peer(&state, &"b".repeat(64)).unwrap().unwrap();
-        assert!(peer.trusted);
+        assert_eq!(peer.trust_state, PeerTrustState::Trusted);
         assert_eq!(peer.name.as_deref(), Some("peer-host"));
         let messages = list_messages(&state, "default", 0).unwrap();
         assert_eq!(messages.len(), 1);
@@ -1256,11 +1444,11 @@ mod tests {
         let path = dir.path().join("state.sqlite3");
         {
             let state = test_state_with_store(Store::open(&path).unwrap());
-            store_untrusted_author_notice(&state, &"b".repeat(64)).unwrap();
+            store_unknown_author_notice(&state, &"b".repeat(64)).unwrap();
         }
 
         let state = test_state_with_store(Store::open(&path).unwrap());
-        store_untrusted_author_notice(&state, &"b".repeat(64)).unwrap();
+        store_unknown_author_notice(&state, &"b".repeat(64)).unwrap();
         let messages = list_messages(&state, "default", 0).unwrap();
         assert_eq!(messages.len(), 1);
     }
@@ -1280,7 +1468,7 @@ mod tests {
         .unwrap();
         let peers = list_peers(&state).unwrap();
         let peer = peers.first().unwrap();
-        assert!(!peer.trusted);
+        assert_eq!(peer.trust_state, PeerTrustState::Unknown);
         assert_eq!(peer.name.as_deref(), Some("peer-host"));
     }
 
@@ -1305,7 +1493,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let peer: PeerRecord = serde_json::from_slice(&bytes).unwrap();
-        assert!(!peer.trusted);
+        assert_eq!(peer.trust_state, PeerTrustState::Unknown);
         assert_eq!(peer.source, "manual");
     }
 
@@ -1334,7 +1522,8 @@ mod tests {
         assert!(peers
             .peers
             .iter()
-            .any(|peer| peer.node_id == "b".repeat(64) && !peer.trusted));
+            .any(|peer| peer.node_id == "b".repeat(64)
+                && peer.trust_state == PeerTrustState::Unknown));
     }
 
     #[tokio::test]
@@ -1364,7 +1553,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let peer: PeerRecord = serde_json::from_slice(&bytes).unwrap();
-        assert!(peer.trusted);
+        assert_eq!(peer.trust_state, PeerTrustState::Trusted);
     }
 
     #[tokio::test]
@@ -1390,10 +1579,76 @@ mod tests {
         let messages = list_messages(&state, "default", 0).unwrap();
         assert_eq!(messages.len(), 1);
         let notice = messages.first().unwrap();
-        assert!(notice.text.contains("tried to send a chat message"));
+        assert!(notice.text.contains("sent a chat message"));
         assert!(notice.text.contains(&author.node_id()));
         assert!(!notice.text.contains("secret text should not be copied"));
+        let quarantined = list_quarantine_messages(&state, &author.node_id()).unwrap();
+        assert_eq!(quarantined.len(), 1);
+        assert_eq!(quarantined[0].text, "secret text should not be copied");
         notice.verify().unwrap();
+    }
+
+    #[tokio::test]
+    async fn trusting_unknown_author_releases_quarantine() {
+        let state = test_state();
+        let author = NodeKey::from_seed_hex(&"02".repeat(32)).unwrap();
+        let message = author.sign_chat("default", 123, "release me after trust");
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/import")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&message).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            list_quarantine_messages(&state, &author.node_id())
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let peer = trust_peer_record(&state, &author.node_id()).unwrap();
+        assert_eq!(peer.trust_state, PeerTrustState::Trusted);
+        assert!(list_quarantine_messages(&state, &author.node_id())
+            .unwrap()
+            .is_empty());
+        let messages = list_messages(&state, "default", 0).unwrap();
+        assert!(messages
+            .iter()
+            .any(|message| message.text == "release me after trust"));
+    }
+
+    #[tokio::test]
+    async fn blocked_author_is_dropped_without_quarantine() {
+        let state = test_state();
+        let author = NodeKey::from_seed_hex(&"02".repeat(32)).unwrap();
+        block_peer_record(&state, &author.node_id()).unwrap();
+        let message = author.sign_chat("default", 123, "drop me");
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/import")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&message).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(list_quarantine_messages(&state, &author.node_id())
+            .unwrap()
+            .is_empty());
+        assert!(list_messages(&state, "default", 0).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1494,7 +1749,7 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let peers: PeersResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(peers.peers[0].name.as_deref(), Some("peer-host"));
-        assert!(!peers.peers[0].trusted);
+        assert_eq!(peers.peers[0].trust_state, PeerTrustState::Unknown);
     }
 
     #[tokio::test]
@@ -1550,6 +1805,33 @@ mod tests {
                 axum::http::Request::builder()
                     .method("POST")
                     .uri(format!("/v1/peers/{}/trust", "b".repeat(64)))
+                    .extension(ConnectInfo(remote_addr()))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn remote_clients_cannot_deny_peers() {
+        let state = test_state();
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://peer".to_owned(),
+                node_id: "b".repeat(64),
+                name: None,
+            },
+            "test",
+        )
+        .unwrap();
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/peers/{}/deny", "b".repeat(64)))
                     .extension(ConnectInfo(remote_addr()))
                     .body(axum::body::Body::empty())
                     .unwrap(),
