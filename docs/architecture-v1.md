@@ -83,6 +83,6 @@ This is alpha software. Current simplifications:
 
 - no auth on LAN public metadata endpoints; chat import still requires a trusted signed author and local controls are localhost-only;
 - no transport encryption beyond whatever network provides;
-- no packaging/service installer beyond `hive node start` yet.
+- no OS service installer beyond `hive node start` yet.
 
 That is acceptable for a small internal alpha, not for hostile networks.
