@@ -7,7 +7,7 @@ Use this before calling a release v1-ready on a real LAN.
 Install, initialize and start one node per machine:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nootr/hivemind/main/install.sh | sh
+curl -fsSL https://hivemind.jhx.app/install.sh | sh
 hive node init
 hive node start
 hive node status

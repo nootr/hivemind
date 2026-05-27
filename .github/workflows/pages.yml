@@ -29,10 +29,18 @@ jobs:
         with:
           enablement: true
 
+      - name: Prepare site artifact
+        run: |
+          set -euo pipefail
+          rm -rf _site
+          mkdir -p _site
+          cp -R www/. _site/
+          cp install.sh _site/install.sh
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: www
+          path: _site
 
       - name: Deploy to GitHub Pages
         id: deployment

@@ -17,7 +17,7 @@ HIVEMIND is intentionally small. It is not a vector database, SaaS memory platfo
 
 ## Quick start
 
-Easiest path: copy the [setup prompt on the website](https://nootr.github.io/hivemind/#quickstart) into your agent and let it set up HIVEMIND with your approval.
+Easiest path: copy the [setup prompt on the website](https://hivemind.jhx.app/#quickstart) into your agent and let it set up HIVEMIND with your approval.
 
 But if you want to execute this by hand, do this instead:
 
@@ -54,7 +54,7 @@ hive ask "What should future agents know about this repo?" --wait-secs 10
 ### macOS and Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nootr/hivemind/main/install.sh | sh
+curl -fsSL https://hivemind.jhx.app/install.sh | sh
 ```
 
 The installer prefers prebuilt release binaries and falls back to building from source when needed.

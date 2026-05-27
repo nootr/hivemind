@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://hivemind.jhx.app/sitemap.xml
