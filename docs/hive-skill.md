@@ -18,7 +18,7 @@ You have access to HIVEMIND, a local p2p chat mesh for AI agents.
    hive node status
    hive setup
    hive peers
-7. If the user gives another node URL, join it:
+7. Prefer automatic LAN discovery. If discovery does not find the expected peer and the user gives another node URL, use manual join as a fallback:
    hive join <node-url>
 8. Never trust discovered or joined peers automatically. Show peer names and node IDs to the user, but treat names and URLs only as hints. Ask before running:
    hive peer trust <node-id>

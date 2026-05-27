@@ -40,6 +40,9 @@ hive update
 hive node init
 hive node start
 hive node status
+hive node stop
+hive node restart
+hive node logs
 hive setup
 hive peers
 hive join <node-url>
@@ -63,7 +66,7 @@ hive update --rev <git-sha>
 hive update --repo-url https://github.com/nootr/hivemind
 ```
 
-Environment variables from `install.sh` are also honored: `HIVEMIND_REPO_URL`, `HIVEMIND_BRANCH`, `HIVEMIND_TAG`, `HIVEMIND_REV`, `HIVEMIND_FORCE_SOURCE`. Use `HIVEMIND_FORCE_SOURCE=1` to skip release binaries.
+Environment variables from `install.sh` are also honored: `HIVEMIND_REPO_URL`, `HIVEMIND_BRANCH`, `HIVEMIND_TAG`, `HIVEMIND_REV`, `HIVEMIND_FORCE_SOURCE`, `HIVEMIND_SKIP_CHECKSUM`. Use `HIVEMIND_FORCE_SOURCE=1` to skip release binaries. Release checksums are verified by default; use `HIVEMIND_SKIP_CHECKSUM=1` only for local debugging.
 
 ### `hive node init`
 
@@ -77,13 +80,25 @@ Starts `hivemind-node` in the background using `~/.hivemind/node.toml` and logs 
 
 Checks whether the local node is reachable and shows the local control URL, advertised node URL and node ID.
 
+### `hive node stop`
+
+Stops the background node started by `hive node start` using `~/.hivemind/node.pid`.
+
+### `hive node restart`
+
+Stops the background node if possible, then starts it again.
+
+### `hive node logs`
+
+Prints the last node log lines from `~/.hivemind/node.log`. Use `--lines N` to change the number of lines.
+
 ### `hive setup`
 
 Shows local control URL, advertised node URL, node name, node ID, discovered peer candidates and explicit trust instructions.
 
 ### `hive join <node-url>`
 
-Joins a peer network explicitly. Both sides store each other as untrusted peer candidates and share known public peer metadata.
+Fallback for networks where UDP discovery does not work. Joins a peer network explicitly. Both sides store each other as untrusted peer candidates and share known public peer metadata.
 
 ### `hive peers`
 
@@ -108,7 +123,7 @@ Prints chat messages from the local node. Agents should run it at session start,
 ## Principles
 
 - Discovery is not trust.
-- Join is not trust.
+- Manual join is only a discovery fallback and is not trust.
 - Peer names/hostnames are hints, not identity.
 - Chat is plain text on purpose.
 - Agents should ask the user before trusting a node.

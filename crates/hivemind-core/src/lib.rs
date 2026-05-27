@@ -75,6 +75,27 @@ impl NodeKey {
             signature: signature_hex,
         }
     }
+
+    pub fn sign_node_proof(&self, node_url: &str, name: Option<String>, nonce: &str) -> NodeProof {
+        let node_id = self.node_id();
+        let unsigned = UnsignedNodeProof {
+            node_url: node_url.to_owned(),
+            node_id: node_id.clone(),
+            name,
+            nonce: nonce.to_owned(),
+        };
+        let signing_bytes = unsigned
+            .signing_bytes()
+            .expect("node proof signing bytes encode");
+        let signature = self.signing_key.sign(&signing_bytes);
+        NodeProof {
+            node_url: unsigned.node_url,
+            node_id,
+            name: unsigned.name,
+            nonce: unsigned.nonce,
+            signature: hex::encode(signature.to_bytes()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -107,6 +128,16 @@ pub struct ChatMessage {
     pub signature: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct NodeProof {
+    pub node_url: String,
+    pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub nonce: String,
+    pub signature: String,
+}
+
 #[derive(Serialize)]
 struct UnsignedChatMessage {
     room: String,
@@ -118,6 +149,43 @@ struct UnsignedChatMessage {
 impl UnsignedChatMessage {
     fn signing_bytes(&self) -> Result<Vec<u8>, CoreError> {
         Ok(serde_json::to_vec(self)?)
+    }
+}
+
+#[derive(Serialize)]
+struct UnsignedNodeProof {
+    node_url: String,
+    node_id: String,
+    name: Option<String>,
+    nonce: String,
+}
+
+impl UnsignedNodeProof {
+    fn signing_bytes(&self) -> Result<Vec<u8>, CoreError> {
+        Ok(serde_json::to_vec(self)?)
+    }
+}
+
+impl NodeProof {
+    pub fn verify(&self) -> Result<(), CoreError> {
+        let key_bytes = hex::decode(&self.node_id)?;
+        let key_bytes: [u8; 32] = key_bytes.try_into().map_err(|_| CoreError::InvalidKey)?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&key_bytes).map_err(|_| CoreError::InvalidKey)?;
+        let sig_bytes = hex::decode(&self.signature)?;
+        let sig_bytes: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| CoreError::InvalidSignature)?;
+        let signature = Signature::from_bytes(&sig_bytes);
+        let unsigned = UnsignedNodeProof {
+            node_url: self.node_url.clone(),
+            node_id: self.node_id.clone(),
+            name: self.name.clone(),
+            nonce: self.nonce.clone(),
+        };
+        verifying_key
+            .verify(&unsigned.signing_bytes()?, &signature)
+            .map_err(|_| CoreError::InvalidSignature)
     }
 }
 
@@ -223,6 +291,22 @@ mod tests {
         let mut message = key.sign_chat("default", 123, "hello");
         message.id = "bad".to_owned();
         assert!(matches!(message.verify(), Err(CoreError::InvalidMessageId)));
+    }
+
+    #[test]
+    fn node_proof_verifies() {
+        let key = NodeKey::generate().unwrap();
+        let proof = key.sign_node_proof("http://127.0.0.1:7747", Some("joris".to_owned()), "abc");
+        proof.verify().unwrap();
+        assert_eq!(proof.node_id, key.node_id());
+    }
+
+    #[test]
+    fn changed_node_proof_fails_verification() {
+        let key = NodeKey::generate().unwrap();
+        let mut proof = key.sign_node_proof("http://127.0.0.1:7747", None, "abc");
+        proof.node_url = "http://127.0.0.1:9999".to_owned();
+        assert!(matches!(proof.verify(), Err(CoreError::InvalidSignature)));
     }
 
     #[test]

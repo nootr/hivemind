@@ -1,3 +1,9 @@
+mod config;
+mod net;
+mod secret_file;
+
+pub use config::NodeConfig;
+
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
@@ -5,15 +11,17 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use hivemind_core::{valid_node_id, ChatMessage, NodeKey, PeerInfo, PeerRecord};
+use hivemind_core::{valid_node_id, ChatMessage, NodeKey, NodeProof, PeerInfo, PeerRecord};
+use net::{inferred_node_url, local_node_url, normalized_node_url, valid_node_url};
 use rusqlite::{params, Connection, OptionalExtension};
+use secret_file::{
+    create_private_state_file_if_missing, load_or_create_key, restrict_state_permissions,
+};
 use serde::{Deserialize, Serialize};
 use std::{
-    env,
-    fs::{self, OpenOptions},
-    io::Write,
-    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket},
-    path::{Path as FsPath, PathBuf},
+    env, fs,
+    net::{Ipv4Addr, SocketAddr},
+    path::Path as FsPath,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -24,20 +32,10 @@ const DISCOVERY_PREFIX: &str = "HIVEMIND_NODE_V2 ";
 const BEACON_FAST_SECS: u64 = 2;
 const BEACON_SLOW_SECS: u64 = 20;
 const PEER_FETCH_TIMEOUT_SECS: u64 = 2;
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct NodeConfig {
-    pub data_dir: PathBuf,
-    pub bind_addr: SocketAddr,
-    pub public_url: Option<String>,
-}
-
-impl NodeConfig {
-    pub fn from_file(path: impl AsRef<FsPath>) -> Result<Self, NodeError> {
-        let input = fs::read_to_string(path)?;
-        Ok(toml::from_str(&input)?)
-    }
-}
+const MAX_CHAT_TEXT_BYTES: usize = 64 * 1024;
+const MAX_ROOM_BYTES: usize = 64;
+const MAX_NONCE_BYTES: usize = 128;
+const MAX_PEERS: i64 = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError {
@@ -160,6 +158,11 @@ pub struct MessagesQuery {
     pub after_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct NodeProofQuery {
+    pub nonce: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct NodeInfoResponse {
     pub node_url: String,
@@ -210,6 +213,7 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/v1/node", get(get_node))
+        .route("/v1/node/proof", get(get_node_proof))
         .route("/v1/peers", get(get_peers).post(add_peer))
         .route("/v1/join", post(join_network))
         .route("/v1/peers/{node_id}/trust", post(trust_peer))
@@ -224,6 +228,20 @@ async fn get_node(State(state): State<AppState>) -> Json<NodeInfoResponse> {
         node_id: state.key.node_id(),
         name: local_node_name(),
     })
+}
+
+async fn get_node_proof(
+    State(state): State<AppState>,
+    Query(query): Query<NodeProofQuery>,
+) -> Result<Json<NodeProof>, ApiError> {
+    if !valid_nonce(&query.nonce) {
+        return Err(ApiError::InvalidRequest);
+    }
+    Ok(Json(state.key.sign_node_proof(
+        &state.node_url(),
+        local_node_name(),
+        &query.nonce,
+    )))
 }
 
 async fn get_peers(
@@ -245,10 +263,7 @@ async fn add_peer(
     Json(peer): Json<PeerInfo>,
 ) -> Result<Json<PeerRecord>, ApiError> {
     require_local_client(client_addr)?;
-    if !valid_node_id(&peer.node_id)
-        || !valid_node_url(&peer.node_url)
-        || peer.node_id == state.key.node_id()
-    {
+    if !valid_peer_info(&peer) || peer.node_id == state.key.node_id() {
         return Err(ApiError::InvalidRequest);
     }
     let node_id = peer.node_id.clone();
@@ -260,10 +275,7 @@ async fn join_network(
     State(state): State<AppState>,
     Json(peer): Json<PeerInfo>,
 ) -> Result<Json<PeersResponse>, ApiError> {
-    if !valid_node_id(&peer.node_id)
-        || !valid_node_url(&peer.node_url)
-        || peer.node_id == state.key.node_id()
-    {
+    if !valid_peer_info(&peer) || peer.node_id == state.key.node_id() {
         return Err(ApiError::InvalidRequest);
     }
     remember_peer(&state, peer, "join")?;
@@ -297,6 +309,9 @@ async fn say(
     Json(request): Json<SayRequest>,
 ) -> Result<Json<ChatMessage>, ApiError> {
     require_local_client(client_addr)?;
+    if !valid_room(&request.room) || !valid_chat_text(&request.text) {
+        return Err(ApiError::InvalidRequest);
+    }
     let message = state.key.sign_chat(&request.room, now_ms(), &request.text);
     store_message(&state, message.clone())?;
     gossip_message(state, message.clone());
@@ -307,6 +322,9 @@ async fn import_message(
     State(state): State<AppState>,
     Json(message): Json<ChatMessage>,
 ) -> Result<Json<ChatMessage>, ApiError> {
+    if !valid_message_payload(&message) {
+        return Err(ApiError::InvalidRequest);
+    }
     message.verify().map_err(|_| ApiError::InvalidRequest)?;
     if message.author_node_id != state.key.node_id()
         && !trusted_author(&state, &message.author_node_id)
@@ -324,6 +342,9 @@ async fn get_messages(
     Query(query): Query<MessagesQuery>,
 ) -> Result<Json<MessagesResponse>, ApiError> {
     require_local_client(client_addr)?;
+    if !valid_room(&query.room) {
+        return Err(ApiError::InvalidRequest);
+    }
     let after_ms = query.after_ms.unwrap_or(0);
     let messages = list_messages(&state, &query.room, after_ms)?;
     Ok(Json(MessagesResponse { messages }))
@@ -539,10 +560,12 @@ async fn discovery_loop(
                 let (len, peer_addr) = received?;
                 let text = String::from_utf8_lossy(&buf[..len]);
                 if let Some(peer) = parse_beacon(&text) {
-                    if peer.node_id != state.key.node_id()
-                        && remember_peer(&state, peer.clone(), "beacon").is_ok()
-                    {
-                        tokio::spawn(fetch_peer_list(state.clone(), peer.clone()));
+                    if peer.node_id != state.key.node_id() {
+                        if trusted_author(&state, &peer.node_id) {
+                            tokio::spawn(verify_and_remember_peer(state.clone(), peer.clone(), "beacon"));
+                        } else if remember_peer(&state, peer.clone(), "beacon").is_ok() {
+                            tokio::spawn(fetch_peer_list(state.clone(), peer.clone()));
+                        }
                     }
                 } else if text.trim() == "HIVEMIND_DISCOVER_V2" {
                     let info = self_peer(bind_addr, public_url.as_deref(), &state, peer_addr);
@@ -612,31 +635,116 @@ fn parse_beacon(input: &str) -> Option<PeerInfo> {
 }
 
 fn remember_peer(state: &AppState, peer: PeerInfo, source: &str) -> Result<(), ApiError> {
+    upsert_peer(state, peer, source, false)
+}
+
+fn remember_verified_peer(state: &AppState, peer: PeerInfo, source: &str) -> Result<(), ApiError> {
+    upsert_peer(state, peer, source, true)
+}
+
+fn upsert_peer(
+    state: &AppState,
+    peer: PeerInfo,
+    source: &str,
+    verified_identity: bool,
+) -> Result<(), ApiError> {
+    if !valid_peer_info(&peer) {
+        return Err(ApiError::InvalidRequest);
+    }
     let seen_at = now_ms();
     let conn = state
         .store
         .conn
         .lock()
         .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    let existing = conn
+        .query_row(
+            "SELECT trusted FROM peers WHERE node_id = ?1",
+            params![peer.node_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(map_store_error)?;
+    if existing.is_none() && peer_count_locked(&conn) >= MAX_PEERS {
+        return Err(ApiError::InvalidRequest);
+    }
     conn.execute(
         r#"
         INSERT INTO peers (node_id, node_url, name, last_seen_ms, trusted, source)
         VALUES (?1, ?2, ?3, ?4, 0, ?5)
         ON CONFLICT(node_id) DO UPDATE SET
-            node_url = excluded.node_url,
-            name = COALESCE(excluded.name, peers.name),
-            last_seen_ms = excluded.last_seen_ms
+            node_url = CASE
+                WHEN peers.trusted = 0 OR ?6 THEN excluded.node_url
+                ELSE peers.node_url
+            END,
+            name = CASE
+                WHEN peers.trusted = 0 OR ?6 THEN COALESCE(excluded.name, peers.name)
+                ELSE peers.name
+            END,
+            last_seen_ms = excluded.last_seen_ms,
+            source = CASE
+                WHEN peers.trusted = 0 OR ?6 THEN excluded.source
+                ELSE peers.source
+            END
         "#,
         params![
             peer.node_id,
             peer.node_url,
             peer.name,
-            seen_at as i64,
-            source
+            i64::try_from(seen_at).unwrap_or(i64::MAX),
+            source,
+            verified_identity
         ],
     )
     .map_err(map_store_error)?;
     Ok(())
+}
+
+async fn verify_and_remember_peer(state: AppState, peer: PeerInfo, source: &'static str) {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(PEER_FETCH_TIMEOUT_SECS))
+        .build()
+    else {
+        return;
+    };
+    if let Some(verified_peer) = verify_peer_identity(&client, &peer).await {
+        let _ = remember_verified_peer(&state, verified_peer.clone(), source);
+        fetch_peer_list(state, verified_peer).await;
+    }
+}
+
+async fn verify_peer_identity(client: &reqwest::Client, peer: &PeerInfo) -> Option<PeerInfo> {
+    let nonce = format!("{}-{}", short_node_id(&peer.node_id), now_ms());
+    let Ok(response) = client
+        .get(format!("{}/v1/node/proof?nonce={}", peer.node_url, nonce))
+        .send()
+        .await
+    else {
+        return None;
+    };
+    let Ok(response) = response.error_for_status() else {
+        return None;
+    };
+    let Ok(proof) = response.json::<NodeProof>().await else {
+        return None;
+    };
+    verified_peer_from_proof(peer, &proof, &nonce)
+}
+
+fn verified_peer_from_proof(peer: &PeerInfo, proof: &NodeProof, nonce: &str) -> Option<PeerInfo> {
+    if proof.node_id != peer.node_id
+        || normalized_node_url(&proof.node_url) != normalized_node_url(&peer.node_url)
+        || proof.nonce != nonce
+        || proof.verify().is_err()
+    {
+        return None;
+    }
+    let verified_peer = PeerInfo {
+        node_url: normalized_node_url(&proof.node_url),
+        node_id: proof.node_id.clone(),
+        name: proof.name.clone(),
+    };
+    valid_peer_info(&verified_peer).then_some(verified_peer)
 }
 
 async fn fetch_peer_list(state: AppState, peer: PeerInfo) {
@@ -710,34 +818,52 @@ fn peer_count(state: &AppState) -> usize {
         .conn
         .lock()
         .ok()
-        .and_then(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM peers", [], |row| row.get::<_, i64>(0))
-                .ok()
-        })
-        .unwrap_or(0) as usize
+        .and_then(|conn| peer_count_locked(&conn).try_into().ok())
+        .unwrap_or(0)
 }
 
-fn inferred_node_url(bind_addr: SocketAddr, target: SocketAddr) -> String {
-    let port = bind_addr.port();
-    if bind_addr.ip().is_loopback() {
-        return format!("http://127.0.0.1:{port}");
-    }
-    let ip = outbound_ip_for(target).unwrap_or(bind_addr.ip());
-    let host = match ip {
-        IpAddr::V4(ip) => ip.to_string(),
-        IpAddr::V6(ip) => format!("[{ip}]"),
-    };
-    format!("http://{host}:{port}")
+fn peer_count_locked(conn: &Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM peers", [], |row| row.get::<_, i64>(0))
+        .unwrap_or(0)
 }
 
-fn outbound_ip_for(peer: SocketAddr) -> Option<IpAddr> {
-    let socket = StdUdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    socket.connect(peer).ok()?;
-    Some(socket.local_addr().ok()?.ip())
+fn valid_peer_info(peer: &PeerInfo) -> bool {
+    valid_node_id(&peer.node_id)
+        && valid_node_url(&peer.node_url)
+        && peer.name.as_deref().and_then(safe_peer_name) == peer.name.as_deref()
 }
 
-fn valid_node_url(url: &str) -> bool {
-    url.starts_with("http://") || url.starts_with("https://")
+fn valid_message_payload(message: &ChatMessage) -> bool {
+    message.id.len() == 64
+        && message.id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && valid_node_id(&message.author_node_id)
+        && valid_room(&message.room)
+        && valid_chat_text(&message.text)
+        && message.signature.len() == 128
+        && message
+            .signature
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_room(room: &str) -> bool {
+    !room.is_empty()
+        && room.len() <= MAX_ROOM_BYTES
+        && room
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn valid_chat_text(text: &str) -> bool {
+    !text.trim().is_empty() && text.len() <= MAX_CHAT_TEXT_BYTES
+}
+
+fn valid_nonce(nonce: &str) -> bool {
+    !nonce.is_empty()
+        && nonce.len() <= MAX_NONCE_BYTES
+        && nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn short_node_id(node_id: &str) -> String {
@@ -749,117 +875,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-fn load_or_create_key(path: &FsPath) -> Result<NodeKey, NodeError> {
-    if path.exists() {
-        restrict_key_permissions(path)?;
-        return Ok(NodeKey::from_seed_hex(&fs::read_to_string(path)?)?);
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let key = NodeKey::generate()?;
-    write_private_key(path, &format!("{}\n", key.seed_hex()))?;
-    Ok(key)
-}
-
-#[cfg(unix)]
-fn write_private_key(path: &FsPath, content: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(content.as_bytes())?;
-    restrict_key_permissions(path)
-}
-
-#[cfg(not(unix))]
-fn write_private_key(path: &FsPath, content: &str) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(content.as_bytes())
-}
-
-#[cfg(unix)]
-fn restrict_key_permissions(path: &FsPath) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(0o600);
-    fs::set_permissions(path, permissions)
-}
-
-#[cfg(not(unix))]
-fn restrict_key_permissions(_path: &FsPath) -> std::io::Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn create_private_state_file_if_missing(path: &FsPath) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    if path.exists() {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn create_private_state_file_if_missing(path: &FsPath) -> std::io::Result<()> {
-    if path.exists() {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    OpenOptions::new().write(true).create_new(true).open(path)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn restrict_state_permissions(path: &FsPath) -> std::io::Result<()> {
-    restrict_key_permissions(path)
-}
-
-#[cfg(not(unix))]
-fn restrict_state_permissions(_path: &FsPath) -> std::io::Result<()> {
-    Ok(())
-}
-
-fn local_node_url(bind_addr: SocketAddr) -> String {
-    format!(
-        "http://{}:{}",
-        public_host(bind_addr.ip()),
-        bind_addr.port()
-    )
-}
-
-fn public_host(bind_ip: IpAddr) -> String {
-    let ip = if bind_ip.is_unspecified() {
-        default_lan_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
-    } else {
-        bind_ip
-    };
-    match ip {
-        IpAddr::V4(ip) => ip.to_string(),
-        IpAddr::V6(ip) => format!("[{ip}]"),
-    }
-}
-
-fn default_lan_ip() -> Option<IpAddr> {
-    outbound_ip_for(SocketAddr::from((Ipv4Addr::new(1, 1, 1, 1), 80)))
-        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
 }
 
 fn local_node_name() -> Option<String> {
@@ -942,6 +957,26 @@ mod tests {
         assert_eq!(state.node_url(), "http://127.0.0.1:18888");
     }
 
+    #[tokio::test]
+    async fn node_proof_route_returns_signed_metadata() {
+        let state = test_state();
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/node/proof?nonce=abc")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let proof: NodeProof = serde_json::from_slice(&bytes).unwrap();
+        proof.verify().unwrap();
+        assert_eq!(proof.node_url, "http://127.0.0.1:7747");
+        assert_eq!(proof.nonce, "abc");
+    }
+
     #[test]
     fn parses_beacon() {
         let node_id = "a".repeat(64);
@@ -1006,6 +1041,145 @@ mod tests {
         let peers = trusted_peers(&state);
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].node_url, "http://trusted");
+    }
+
+    #[test]
+    fn unverified_update_does_not_change_trusted_peer_url() {
+        let state = test_state();
+        let node_id = "b".repeat(64);
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://trusted.example:7747".to_owned(),
+                node_id: node_id.clone(),
+                name: Some("real-host".to_owned()),
+            },
+            "test",
+        )
+        .unwrap();
+        trust_peer_record(&state, &node_id).unwrap();
+
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://attacker.example:7747".to_owned(),
+                node_id: node_id.clone(),
+                name: Some("fake-host".to_owned()),
+            },
+            "beacon",
+        )
+        .unwrap();
+
+        let peer = get_peer(&state, &node_id).unwrap().unwrap();
+        assert_eq!(peer.node_url, "http://trusted.example:7747");
+        assert_eq!(peer.name.as_deref(), Some("real-host"));
+        assert_eq!(peer.source, "test");
+        assert!(peer.trusted);
+    }
+
+    #[test]
+    fn node_proof_conversion_uses_signed_peer_metadata() {
+        let key = NodeKey::from_seed_hex(&"02".repeat(32)).unwrap();
+        let signed = key.sign_node_proof(
+            "http://new.example:7747",
+            Some("signed-host".to_owned()),
+            "abc",
+        );
+        let spoofed_beacon = PeerInfo {
+            node_url: "http://new.example:7747".to_owned(),
+            node_id: key.node_id(),
+            name: Some("fake-host".to_owned()),
+        };
+        let verified = verified_peer_from_proof(&spoofed_beacon, &signed, "abc").unwrap();
+        assert_eq!(verified.name.as_deref(), Some("signed-host"));
+    }
+
+    #[test]
+    fn verified_update_uses_signed_peer_metadata() {
+        let state = test_state();
+        let node_id = "b".repeat(64);
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://old.example:7747".to_owned(),
+                node_id: node_id.clone(),
+                name: Some("old-host".to_owned()),
+            },
+            "test",
+        )
+        .unwrap();
+        trust_peer_record(&state, &node_id).unwrap();
+
+        remember_verified_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://new.example:7747".to_owned(),
+                node_id: node_id.clone(),
+                name: Some("signed-host".to_owned()),
+            },
+            "verified",
+        )
+        .unwrap();
+
+        let peer = get_peer(&state, &node_id).unwrap().unwrap();
+        assert_eq!(peer.node_url, "http://new.example:7747");
+        assert_eq!(peer.name.as_deref(), Some("signed-host"));
+        assert_eq!(peer.source, "verified");
+        assert!(peer.trusted);
+    }
+
+    #[test]
+    fn verified_update_can_change_trusted_peer_url() {
+        let state = test_state();
+        let node_id = "b".repeat(64);
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://old.example:7747".to_owned(),
+                node_id: node_id.clone(),
+                name: Some("old-host".to_owned()),
+            },
+            "test",
+        )
+        .unwrap();
+        trust_peer_record(&state, &node_id).unwrap();
+
+        remember_verified_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://new.example:7747".to_owned(),
+                node_id: node_id.clone(),
+                name: Some("new-host".to_owned()),
+            },
+            "verified",
+        )
+        .unwrap();
+
+        let peer = get_peer(&state, &node_id).unwrap().unwrap();
+        assert_eq!(peer.node_url, "http://new.example:7747");
+        assert_eq!(peer.name.as_deref(), Some("new-host"));
+        assert_eq!(peer.source, "verified");
+        assert!(peer.trusted);
+    }
+
+    #[test]
+    fn validates_node_urls_strictly() {
+        assert!(valid_node_url("http://127.0.0.1:7747"));
+        assert!(valid_node_url("https://hivemind.jhx.app"));
+        assert!(!valid_node_url("ftp://127.0.0.1"));
+        assert!(!valid_node_url("http://user:pass@example.com"));
+        assert!(!valid_node_url("http://example.com/#fragment"));
+        assert!(!valid_node_url("http://example.com/bad url"));
+    }
+
+    #[test]
+    fn rejects_invalid_room_and_oversized_chat_text() {
+        assert!(valid_room("default"));
+        assert!(!valid_room("bad room"));
+        assert!(!valid_room(""));
+        assert!(valid_chat_text("hello"));
+        assert!(!valid_chat_text("   "));
+        assert!(!valid_chat_text(&"x".repeat(MAX_CHAT_TEXT_BYTES + 1)));
     }
 
     #[test]

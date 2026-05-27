@@ -11,8 +11,7 @@ use std::{
 
 const DEFAULT_NODE_URL: &str = "http://127.0.0.1:7747";
 const DEFAULT_REPO_URL: &str = "https://github.com/nootr/hivemind";
-const DEFAULT_INSTALL_URL: &str =
-    "https://raw.githubusercontent.com/nootr/hivemind/main/install.sh";
+const DEFAULT_INSTALL_URL: &str = "https://hivemind.jhx.app/install.sh";
 
 #[derive(Debug, Parser, Eq, PartialEq)]
 #[command(name = "hive")]
@@ -86,6 +85,19 @@ pub enum NodeCommand {
         #[arg(long)]
         log: Option<PathBuf>,
     },
+    Stop,
+    Restart {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        log: Option<PathBuf>,
+    },
+    Logs {
+        #[arg(long)]
+        log: Option<PathBuf>,
+        #[arg(long, default_value_t = 80)]
+        lines: usize,
+    },
     Status,
 }
 
@@ -112,6 +124,8 @@ pub enum CliError {
     MultipleUpdateRefs,
     #[error("update command failed: {0}")]
     UpdateFailed(String),
+    #[error("node control failed: {0}")]
+    NodeControlFailed(String),
 }
 
 #[derive(Debug, Serialize)]
@@ -164,6 +178,9 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
                 force,
             } => node_init(config, data_dir, &bind_addr, public_url.as_deref(), force),
             NodeCommand::Start { config, log } => node_start(client, config, log).await,
+            NodeCommand::Stop => node_stop(),
+            NodeCommand::Restart { config, log } => node_restart(client, config, log).await,
+            NodeCommand::Logs { log, lines } => node_logs(log, lines),
             NodeCommand::Status => node_status(client).await,
         },
         Command::Join { node_url } => join(client, &node_url).await,
@@ -354,6 +371,7 @@ async fn node_start(
     log: Option<PathBuf>,
 ) -> Result<String, CliError> {
     let home = home_dir()?;
+    let pid = home.join(".hivemind/node.pid");
     let config = config.unwrap_or_else(|| home.join(".hivemind/node.toml"));
     let log = log.unwrap_or_else(|| home.join(".hivemind/node.log"));
     if node_running(client).await {
@@ -372,6 +390,9 @@ async fn node_start(
         .append(true)
         .open(&log)?;
     let stderr = stdout.try_clone()?;
+    if let Some(parent) = pid.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let child = ProcessCommand::new("hivemind-node")
         .arg("--config")
         .arg(&config)
@@ -379,13 +400,15 @@ async fn node_start(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .spawn()?;
+    fs::write(&pid, format!("{}\n", child.id()))?;
     for _ in 0..20 {
         if node_running(client).await {
             return Ok(format!(
-                "started hivemind-node pid {}\nconfig: {}\nlog: {}\nthen run:\n  hive setup",
+                "started hivemind-node pid {}\nconfig: {}\nlog: {}\npid: {}\nthen run:\n  hive setup",
                 child.id(),
                 config.display(),
-                log.display()
+                log.display(),
+                pid.display()
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -396,6 +419,117 @@ async fn node_start(
         config.display(),
         log.display()
     ))
+}
+
+fn node_stop() -> Result<String, CliError> {
+    let pid_path = home_dir()?.join(".hivemind/node.pid");
+    if !pid_path.exists() {
+        return Ok(format!(
+            "no hivemind-node pid file found at {}\nif the node is running, stop it manually or restart your shell session",
+            pid_path.display()
+        ));
+    }
+    let pid = fs::read_to_string(&pid_path)?.trim().to_owned();
+    if pid.is_empty() || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(CliError::NodeControlFailed(format!(
+            "invalid pid file: {}",
+            pid_path.display()
+        )));
+    }
+    if !pid_belongs_to_hivemind_node(&pid)? {
+        let _ = fs::remove_file(&pid_path);
+        return Ok(format!(
+            "removed stale pid file {}; pid {pid} is not a running hivemind-node",
+            pid_path.display()
+        ));
+    }
+    let status = stop_pid(&pid)?;
+    if status.success() {
+        let _ = fs::remove_file(&pid_path);
+        Ok(format!("stopped hivemind-node pid {pid}"))
+    } else {
+        Err(CliError::NodeControlFailed(format!(
+            "failed to stop hivemind-node pid {pid}: {status}"
+        )))
+    }
+}
+
+#[cfg(unix)]
+fn pid_belongs_to_hivemind_node(pid: &str) -> Result<bool, CliError> {
+    let output = ProcessCommand::new("ps")
+        .arg("-p")
+        .arg(pid)
+        .arg("-o")
+        .arg("comm=")
+        .output()?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    let command = String::from_utf8_lossy(&output.stdout);
+    Ok(command
+        .trim()
+        .rsplit('/')
+        .next()
+        .map(|name| name == "hivemind-node")
+        .unwrap_or(false))
+}
+
+#[cfg(windows)]
+fn pid_belongs_to_hivemind_node(pid: &str) -> Result<bool, CliError> {
+    let output = ProcessCommand::new("tasklist")
+        .arg("/FI")
+        .arg(format!("PID eq {pid}"))
+        .arg("/FO")
+        .arg("CSV")
+        .arg("/NH")
+        .output()?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .to_ascii_lowercase()
+        .contains("hivemind-node.exe"))
+}
+
+#[cfg(unix)]
+fn stop_pid(pid: &str) -> Result<std::process::ExitStatus, CliError> {
+    Ok(ProcessCommand::new("kill").arg(pid).status()?)
+}
+
+#[cfg(windows)]
+fn stop_pid(pid: &str) -> Result<std::process::ExitStatus, CliError> {
+    Ok(ProcessCommand::new("taskkill")
+        .arg("/PID")
+        .arg(pid)
+        .arg("/F")
+        .status()?)
+}
+
+async fn node_restart(
+    client: &reqwest::Client,
+    config: Option<PathBuf>,
+    log: Option<PathBuf>,
+) -> Result<String, CliError> {
+    let stop_output = node_stop().unwrap_or_else(|err| format!("stop skipped: {err}"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let start_output = node_start(client, config, log).await?;
+    Ok(format!("{stop_output}\n\n{start_output}"))
+}
+
+fn node_logs(log: Option<PathBuf>, lines: usize) -> Result<String, CliError> {
+    let home = home_dir()?;
+    let log = log.unwrap_or_else(|| home.join(".hivemind/node.log"));
+    if !log.exists() {
+        return Ok(format!("node log does not exist yet: {}", log.display()));
+    }
+    let content = fs::read_to_string(&log)?;
+    let mut tail = content.lines().rev().take(lines).collect::<Vec<_>>();
+    tail.reverse();
+    if tail.is_empty() {
+        Ok(format!("node log is empty: {}", log.display()))
+    } else {
+        Ok(tail.join("\n"))
+    }
 }
 
 async fn node_status(client: &reqwest::Client) -> Result<String, CliError> {
@@ -790,6 +924,53 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn parses_node_stop() {
+        assert_eq!(
+            Cli::parse_from(["hive", "node", "stop"]),
+            Cli {
+                command: Command::Node {
+                    command: NodeCommand::Stop
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_node_restart() {
+        assert_eq!(
+            Cli::parse_from(["hive", "node", "restart"]),
+            Cli {
+                command: Command::Node {
+                    command: NodeCommand::Restart {
+                        config: None,
+                        log: None,
+                    }
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_node_logs() {
+        assert_eq!(
+            Cli::parse_from(["hive", "node", "logs", "--lines", "20"]),
+            Cli {
+                command: Command::Node {
+                    command: NodeCommand::Logs {
+                        log: None,
+                        lines: 20,
+                    }
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn default_install_url_uses_custom_domain() {
+        assert_eq!(DEFAULT_INSTALL_URL, "https://hivemind.jhx.app/install.sh");
     }
 
     #[test]

@@ -15,8 +15,8 @@ Run one node per user or machine. Do not start a server per agent: that creates 
 
 ## Crates
 
-- `hivemind-core`: identities, peer records, signed chat messages.
-- `hivemind-node`: HTTP mini-server, SQLite state, UDP beacons, explicit join, peer sharing, chat gossip.
+- `hivemind-core`: identities, peer records, signed chat messages, signed node metadata proofs.
+- `hivemind-node`: HTTP mini-server, SQLite state, UDP beacons, explicit join fallback, peer sharing, chat gossip.
 - `hivemind-cli`: agent/user commands.
 
 This is hex-ish, but deliberately small: core types, app behavior in node/CLI, adapters are just HTTP/UDP/file IO.
@@ -38,9 +38,11 @@ A beacon contains only:
 
 Discovery stores peer candidates as untrusted, with `last_seen_ms` updated whenever a peer is heard again. Discovery never grants access and never marks a peer trusted. Peer names and URLs are advisory metadata; node ID/public key is the only identity used for trust.
 
+Unauthenticated discovery, join and peer gossip cannot change the stored URL/name/source for an already trusted peer. If a trusted peer appears at a new URL, the node first fetches `/v1/node/proof?nonce=...` from that URL and verifies the signed node metadata proof against the trusted node ID before updating the trusted peer record.
+
 ## Join
 
-`hive join <node-url>` asks the remote node to join peer networks:
+Manual join is a fallback for networks where UDP discovery does not work. `hive join <node-url>` asks the remote node to join peer networks:
 
 1. local node sends its public peer info to remote `/v1/join`;
 2. remote stores local node as untrusted;
@@ -57,7 +59,7 @@ Trust is manual and local:
 hive peer trust <node-id>
 ```
 
-Trust is by node ID/public key, not by name, URL or IP. Names help humans recognize likely machines, but they can be spoofed. URL/IP can change and must not be used as identity.
+Trust is by node ID/public key, not by name, URL or IP. Names help humans recognize likely machines, but they can be spoofed. URL/IP can change and must not be used as identity. Trusted peer URL changes require a signed node proof from the same node ID.
 
 ## Chat
 
@@ -81,8 +83,8 @@ The node is not an AI responder. It is the local postbox. Active agent sessions 
 
 This is alpha software. Current simplifications:
 
-- no auth on LAN public metadata endpoints; chat import still requires a trusted signed author and local controls are localhost-only;
+- no auth on LAN public metadata endpoints; trusted URL updates and chat import still require signatures and local controls are localhost-only;
 - no transport encryption beyond whatever network provides;
-- no OS service installer beyond `hive node start` yet.
+- no OS service installer beyond `hive node start`; `hive node stop`, `restart` and `logs` are lightweight PID/log helpers.
 
 That is acceptable for a small internal alpha, not for hostile networks.

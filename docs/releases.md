@@ -32,7 +32,7 @@ The release workflow can also be run manually to build artifacts without publish
 
 ## Installer behavior
 
-`install.sh` uses prebuilt release binaries by default on supported Unix platforms. Windows users should download the `.zip` release asset manually and place `hive.exe` and `hivemind-node.exe` on `PATH`.
+`install.sh` uses prebuilt release binaries by default on supported Unix platforms and verifies the downloaded archive against `SHA256SUMS`. Windows users should download the `.zip` release asset manually and place `hive.exe` and `hivemind-node.exe` on `PATH`.
 
 The installer falls back to `cargo install --git` when:
 
@@ -40,6 +40,8 @@ The installer falls back to `cargo install --git` when:
 - `HIVEMIND_BRANCH` or `HIVEMIND_REV` is set;
 - `HIVEMIND_REPO_URL` points at a custom repository;
 - `HIVEMIND_FORCE_SOURCE=1` is set.
+
+Set `HIVEMIND_SKIP_CHECKSUM=1` only for local debugging or unreleased test artifacts.
 
 `HIVEMIND_TAG=v0.1.0` installs from that release tag when a matching asset exists, otherwise it falls back to source install from the same tag.
 

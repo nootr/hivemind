@@ -47,9 +47,15 @@ hive setup
 hive peers
 ```
 
-## Joining peers
+## Discovering peers
 
-If the user gives a peer URL:
+Use automatic LAN discovery first:
+
+```bash
+hive peers
+```
+
+If discovery does not find the expected peer and the user gives a peer URL, use manual join as a fallback:
 
 ```bash
 hive join <node-url>

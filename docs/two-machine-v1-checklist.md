@@ -22,19 +22,18 @@ Record for each machine:
 
 Names and URLs are only recognition hints. Verify node IDs out-of-band before trust.
 
-## Join
+## Discover
 
-From machine A:
+Keep both nodes running on the same LAN for a few seconds, then check discovered candidates on both machines:
 
 ```bash
-hive join <machine-b-advertised-node-url>
 hive peers
 ```
 
-From machine B:
+If UDP discovery is blocked, use manual join as a fallback, then check peers again:
 
 ```bash
-hive join <machine-a-advertised-node-url>
+hive join <other-machine-advertised-node-url>
 hive peers
 ```
 
