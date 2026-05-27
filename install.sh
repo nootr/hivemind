@@ -7,6 +7,7 @@ BRANCH="${HIVEMIND_BRANCH:-}"
 TAG="${HIVEMIND_TAG:-}"
 REV="${HIVEMIND_REV:-}"
 FORCE_SOURCE="${HIVEMIND_FORCE_SOURCE:-}"
+SKIP_CHECKSUM="${HIVEMIND_SKIP_CHECKSUM:-}"
 
 fail() {
   echo "Error: $*" >&2
@@ -73,6 +74,10 @@ install_release() {
     rm -rf "$tmp"
     return 1
   fi
+  if ! verify_release_checksum "$asset" "$archive" "$tmp"; then
+    rm -rf "$tmp"
+    fail "release checksum verification failed for $asset"
+  fi
   if ! tar -xzf "$archive" -C "$tmp"; then
     rm -rf "$tmp"
     return 1
@@ -82,6 +87,42 @@ install_release() {
   install_binary "$tmp/hivemind-node" "$bin_dir/hivemind-node"
   rm -rf "$tmp"
   return 0
+}
+
+verify_release_checksum() {
+  asset="$1"
+  archive="$2"
+  tmp="$3"
+  [ -z "$SKIP_CHECKSUM" ] || return 0
+  sums_url="$(release_url SHA256SUMS)"
+  sums="$tmp/SHA256SUMS"
+  echo "Verifying release checksum: $sums_url"
+  if ! curl -fL "$sums_url" -o "$sums"; then
+    return 1
+  fi
+  expected="$(awk -v asset="$asset" '$2 == asset || $2 == "./" asset || $2 ~ "/" asset "$" { print $1; exit }' "$sums")"
+  [ -n "$expected" ] || return 1
+  actual="$(sha256_file "$archive")" || return 1
+  [ "$expected" = "$actual" ] || {
+    echo "Checksum mismatch for $asset" >&2
+    echo "expected: $expected" >&2
+    echo "actual:   $actual" >&2
+    return 1
+  }
+}
+
+sha256_file() {
+  file="$1"
+  if need sha256sum; then
+    sha256sum "$file" | awk '{print $1}'
+  elif need shasum; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif need openssl; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+  else
+    echo "no SHA-256 tool found; set HIVEMIND_SKIP_CHECKSUM=1 to bypass checksum verification" >&2
+    return 1
+  fi
 }
 
 install_binary() {
