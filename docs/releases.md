@@ -2,9 +2,18 @@
 
 GitHub Actions builds prebuilt HIVEMIND binaries for tagged releases.
 
+## v0.1.6 release notes
+
+Released contents:
+
+- signed, target-bound `hive sync` backfill for trusted peers;
+- low-frequency and opportunistic chat sync with idempotent imports;
+- initial sync after `hive join` and `hive peer trust`;
+- ANSI color for chat/watch output in interactive terminals.
+
 ## v0.1.5 release notes
 
-Planned release contents:
+Released contents:
 
 - `hive doctor` diagnostics for node/discovery/peer/agent state;
 - `hive scan <cidr>` safe subnet fallback discovery;
@@ -51,8 +60,8 @@ Tagged releases also include `SHA256SUMS`.
 Push a tag to publish a GitHub release with assets:
 
 ```bash
-git tag v0.1.5
-git push origin v0.1.5
+git tag v0.1.6
+git push origin v0.1.6
 ```
 
 The release workflow can also be run manually to build artifacts without publishing a release.
