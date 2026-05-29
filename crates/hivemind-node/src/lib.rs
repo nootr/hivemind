@@ -14,7 +14,7 @@ use axum::{
 use get_if_addrs::{get_if_addrs, IfAddr};
 use hivemind_core::{
     inbound_decision, valid_node_id, AgentRecord, ChatMessage, DeliveryRecord, DeliveryStatus,
-    InboundDecision, NodeKey, NodeProof, PeerInfo, PeerRecord, PeerTrustState,
+    InboundDecision, NodeKey, NodeProof, PeerInfo, PeerRecord, PeerTrustState, SignedSyncRequest,
 };
 use net::{inferred_node_url, local_node_url, normalized_node_url, valid_node_url};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -46,6 +46,9 @@ const MAX_CAPABILITIES: usize = 16;
 const MAX_AGENT_TTL_SECS: u64 = 60 * 60;
 const MAX_DELIVERY_ERROR_BYTES: usize = 512;
 const MAX_PEERS: i64 = 1024;
+const MAX_SYNC_MESSAGES: u16 = 500;
+const SYNC_INTERVAL_SECS: u64 = 180;
+const SYNC_CURSOR_OVERLAP_MS: u64 = 5 * 60 * 1000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError {
@@ -118,7 +121,7 @@ impl Store {
 
 fn migrate_store(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version > 3 {
+    if version > 4 {
         return Err(rusqlite::Error::InvalidQuery);
     }
     conn.execute_batch(
@@ -177,6 +180,12 @@ fn migrate_store(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS agents_expires_idx
             ON agents(expires_at_ms);
+        CREATE TABLE IF NOT EXISTS sync_cursors (
+            peer_node_id TEXT NOT NULL,
+            room TEXT NOT NULL,
+            last_synced_ms INTEGER NOT NULL,
+            PRIMARY KEY (peer_node_id, room)
+        );
         "#,
     )?;
     if column_exists(conn, "peers", "trusted")? {
@@ -186,7 +195,7 @@ fn migrate_store(conn: &Connection) -> rusqlite::Result<()> {
             "ALTER TABLE peers ADD COLUMN trust_state TEXT NOT NULL DEFAULT 'unknown';",
         )?;
     }
-    conn.execute_batch("PRAGMA user_version = 3;")
+    conn.execute_batch("PRAGMA user_version = 4;")
 }
 
 fn rebuild_peers_without_legacy_trusted(conn: &Connection) -> rusqlite::Result<()> {
@@ -260,6 +269,18 @@ pub struct MessagesQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SyncControlRequest {
+    #[serde(default = "default_sync_target")]
+    pub target: String,
+    #[serde(default = "default_room")]
+    pub room: String,
+    #[serde(default)]
+    pub since_ms: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct NodeProofQuery {
     pub nonce: String,
 }
@@ -294,6 +315,23 @@ pub struct MessagesResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct SyncResponse {
+    pub results: Vec<SyncPeerResult>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct SyncPeerResult {
+    pub peer_node_id: String,
+    pub peer_url: String,
+    pub after_ms: u64,
+    pub fetched: usize,
+    pub imported: usize,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct DeliveriesResponse {
     pub deliveries: Vec<DeliveryRecord>,
 }
@@ -305,6 +343,10 @@ pub struct AgentsResponse {
 
 fn default_room() -> String {
     "default".to_owned()
+}
+
+fn default_sync_target() -> String {
+    "all".to_owned()
 }
 
 pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
@@ -319,6 +361,7 @@ pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
     };
 
     spawn_discovery(config.bind_addr, config.public_url, state.clone());
+    spawn_sync_loop(state.clone());
     serve(config.bind_addr, app(state)).await?;
     Ok(())
 }
@@ -342,6 +385,8 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/peers/{node_id}/deny", post(deny_peer))
         .route("/v1/chat", get(get_messages).post(say))
         .route("/v1/chat/import", post(import_message))
+        .route("/v1/chat/sync", post(sync_messages))
+        .route("/v1/sync", post(sync_control))
         .route("/v1/deliveries/{message_id}", get(get_deliveries))
         .route("/v1/agents", get(get_agents))
         .route("/v1/agents/heartbeat", post(agent_heartbeat))
@@ -490,6 +535,49 @@ async fn get_messages(
     let after_ms = query.after_ms.unwrap_or(0);
     let messages = list_messages(&state, &query.room, after_ms)?;
     Ok(Json(MessagesResponse { messages }))
+}
+
+async fn sync_messages(
+    State(state): State<AppState>,
+    Json(request): Json<SignedSyncRequest>,
+) -> Result<Json<MessagesResponse>, ApiError> {
+    if !valid_sync_request(&request) {
+        return Err(ApiError::InvalidRequest);
+    }
+    request.verify().map_err(|_| ApiError::InvalidRequest)?;
+    if request.target_node_id != state.key.node_id() {
+        return Err(ApiError::Forbidden);
+    }
+    if peer_trust_state(&state, &request.requester_node_id) != PeerTrustState::Trusted {
+        return Err(ApiError::Forbidden);
+    }
+    let messages =
+        list_messages_limited(&state, &request.room, request.after_ms, Some(request.limit))?;
+    Ok(Json(MessagesResponse { messages }))
+}
+
+async fn sync_control(
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    Json(request): Json<SyncControlRequest>,
+) -> Result<Json<SyncResponse>, ApiError> {
+    require_local_client(client_addr)?;
+    if !valid_room(&request.room) {
+        return Err(ApiError::InvalidRequest);
+    }
+    let limit = request
+        .limit
+        .unwrap_or(MAX_SYNC_MESSAGES)
+        .min(MAX_SYNC_MESSAGES);
+    if limit == 0 {
+        return Err(ApiError::InvalidRequest);
+    }
+    let peers = sync_target_peers(&state, &request.target)?;
+    let mut results = Vec::new();
+    for peer in peers {
+        results.push(sync_peer(&state, &peer, &request.room, request.since_ms, limit).await);
+    }
+    Ok(Json(SyncResponse { results }))
 }
 
 async fn get_deliveries(
@@ -707,10 +795,96 @@ fn block_peer_record(state: &AppState, node_id: &str) -> Result<PeerRecord, ApiE
     Ok(peer)
 }
 
+fn valid_sync_request(request: &SignedSyncRequest) -> bool {
+    valid_node_id(&request.requester_node_id)
+        && valid_node_id(&request.target_node_id)
+        && valid_room(&request.room)
+        && request.limit > 0
+        && request.limit <= MAX_SYNC_MESSAGES
+        && valid_nonce(&request.nonce)
+}
+
+fn sync_target_peers(state: &AppState, target: &str) -> Result<Vec<PeerRecord>, ApiError> {
+    let trusted = trusted_peers(state);
+    if target == "all" {
+        return Ok(trusted);
+    }
+    let matches = trusted
+        .into_iter()
+        .filter(|peer| peer.node_id == target || peer.node_id.starts_with(target))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [peer] => Ok(vec![peer.clone()]),
+        [] => Err(ApiError::NotFound),
+        _ => Err(ApiError::InvalidRequest),
+    }
+}
+
+fn sync_after_ms(state: &AppState, peer_node_id: &str, room: &str, since_ms: Option<u64>) -> u64 {
+    since_ms.unwrap_or_else(|| {
+        sync_cursor(state, peer_node_id, room)
+            .unwrap_or(0)
+            .saturating_sub(SYNC_CURSOR_OVERLAP_MS)
+    })
+}
+
+fn sync_cursor(state: &AppState, peer_node_id: &str, room: &str) -> Result<u64, ApiError> {
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    let cursor = conn
+        .query_row(
+            "SELECT last_synced_ms FROM sync_cursors WHERE peer_node_id = ?1 AND room = ?2",
+            params![peer_node_id, room],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(map_store_error)?
+        .unwrap_or(0);
+    Ok(cursor.max(0) as u64)
+}
+
+fn update_sync_cursor(
+    state: &AppState,
+    peer_node_id: &str,
+    room: &str,
+    last_synced_ms: u64,
+) -> Result<(), ApiError> {
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    conn.execute(
+        "INSERT INTO sync_cursors (peer_node_id, room, last_synced_ms)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(peer_node_id, room) DO UPDATE SET
+             last_synced_ms = MAX(sync_cursors.last_synced_ms, excluded.last_synced_ms)",
+        params![
+            peer_node_id,
+            room,
+            i64::try_from(last_synced_ms).unwrap_or(i64::MAX)
+        ],
+    )
+    .map_err(map_store_error)?;
+    Ok(())
+}
+
 fn list_messages(
     state: &AppState,
     room: &str,
     after_ms: u64,
+) -> Result<Vec<ChatMessage>, ApiError> {
+    list_messages_limited(state, room, after_ms, None)
+}
+
+fn list_messages_limited(
+    state: &AppState,
+    room: &str,
+    after_ms: u64,
+    limit: Option<u16>,
 ) -> Result<Vec<ChatMessage>, ApiError> {
     let after_ms = i64::try_from(after_ms).unwrap_or(i64::MAX);
     let conn = state
@@ -718,19 +892,34 @@ fn list_messages(
         .conn
         .lock()
         .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
-    let mut statement = conn
-        .prepare(
+    let sql = match limit {
+        Some(_) => {
             "SELECT id, room, author_node_id, created_at_ms, text, signature
              FROM messages
              WHERE room = ?1 AND created_at_ms > ?2
-             ORDER BY created_at_ms ASC, id ASC",
-        )
-        .map_err(map_store_error)?;
-    let messages = statement
-        .query_map(params![room, after_ms], row_to_message)
-        .map_err(map_store_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(map_store_error)?;
+             ORDER BY created_at_ms ASC, id ASC
+             LIMIT ?3"
+        }
+        None => {
+            "SELECT id, room, author_node_id, created_at_ms, text, signature
+             FROM messages
+             WHERE room = ?1 AND created_at_ms > ?2
+             ORDER BY created_at_ms ASC, id ASC"
+        }
+    };
+    let mut statement = conn.prepare(sql).map_err(map_store_error)?;
+    let messages = match limit {
+        Some(limit) => statement
+            .query_map(params![room, after_ms, i64::from(limit)], row_to_message)
+            .map_err(map_store_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_store_error)?,
+        None => statement
+            .query_map(params![room, after_ms], row_to_message)
+            .map_err(map_store_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_store_error)?,
+    };
     Ok(messages)
 }
 
@@ -760,26 +949,126 @@ fn list_quarantine_messages(
     Ok(messages)
 }
 
-fn store_message(state: &AppState, message: ChatMessage) -> Result<(), ApiError> {
+fn insert_message(state: &AppState, message: ChatMessage) -> Result<bool, ApiError> {
     let conn = state
         .store
         .conn
         .lock()
         .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
-    conn.execute(
-        "INSERT OR IGNORE INTO messages (id, room, author_node_id, created_at_ms, text, signature)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            message.id,
-            message.room,
-            message.author_node_id,
-            i64::try_from(message.created_at_ms).unwrap_or(i64::MAX),
-            message.text,
-            message.signature
-        ],
-    )
-    .map_err(map_store_error)?;
-    Ok(())
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO messages (id, room, author_node_id, created_at_ms, text, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                message.id,
+                message.room,
+                message.author_node_id,
+                i64::try_from(message.created_at_ms).unwrap_or(i64::MAX),
+                message.text,
+                message.signature
+            ],
+        )
+        .map_err(map_store_error)?;
+    Ok(inserted > 0)
+}
+
+fn store_message(state: &AppState, message: ChatMessage) -> Result<(), ApiError> {
+    insert_message(state, message).map(|_| ())
+}
+
+async fn sync_peer(
+    state: &AppState,
+    peer: &PeerRecord,
+    room: &str,
+    since_ms: Option<u64>,
+    limit: u16,
+) -> SyncPeerResult {
+    let after_ms = sync_after_ms(state, &peer.node_id, room, since_ms);
+    let request = state.key.sign_sync_request(
+        &peer.node_id,
+        room,
+        after_ms,
+        limit,
+        &format!("{}-{}", short_node_id(&state.key.node_id()), now_ms()),
+    );
+    let response = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(PEER_FETCH_TIMEOUT_SECS))
+        .build()
+    {
+        Ok(client) => {
+            client
+                .post(format!("{}/v1/chat/sync", peer.node_url))
+                .json(&request)
+                .send()
+                .await
+        }
+        Err(err) => {
+            return sync_error(peer, after_ms, format!("http client: {err}"));
+        }
+    };
+    let response = match response {
+        Ok(response) => match response.error_for_status() {
+            Ok(response) => response,
+            Err(err) => return sync_error(peer, after_ms, err.to_string()),
+        },
+        Err(err) => return sync_error(peer, after_ms, err.to_string()),
+    };
+    let response = match response.json::<MessagesResponse>().await {
+        Ok(response) => response,
+        Err(err) => return sync_error(peer, after_ms, err.to_string()),
+    };
+
+    let fetched = response.messages.len();
+    let mut imported = 0;
+    let mut last_seen = after_ms;
+    for message in response.messages {
+        last_seen = last_seen.max(message.created_at_ms);
+        if import_synced_message(state, message).unwrap_or(false) {
+            imported += 1;
+        }
+    }
+    if since_ms.is_none() {
+        let cursor = if fetched == 0 { now_ms() } else { last_seen };
+        let _ = update_sync_cursor(state, &peer.node_id, room, cursor);
+    }
+    SyncPeerResult {
+        peer_node_id: peer.node_id.clone(),
+        peer_url: peer.node_url.clone(),
+        after_ms,
+        fetched,
+        imported,
+        status: "ok".to_owned(),
+        error: None,
+    }
+}
+
+fn sync_error(peer: &PeerRecord, after_ms: u64, error: String) -> SyncPeerResult {
+    SyncPeerResult {
+        peer_node_id: peer.node_id.clone(),
+        peer_url: peer.node_url.clone(),
+        after_ms,
+        fetched: 0,
+        imported: 0,
+        status: "failed".to_owned(),
+        error: Some(truncate_delivery_error(&error)),
+    }
+}
+
+fn import_synced_message(state: &AppState, message: ChatMessage) -> Result<bool, ApiError> {
+    if !valid_message_payload(&message) || message.verify().is_err() {
+        return Ok(false);
+    }
+    if message.author_node_id == state.key.node_id() {
+        return insert_message(state, message);
+    }
+    match inbound_decision(peer_trust_state(state, &message.author_node_id)) {
+        InboundDecision::Accept => insert_message(state, message),
+        InboundDecision::Quarantine => {
+            quarantine_unknown_message(state, message)?;
+            Ok(false)
+        }
+        InboundDecision::Drop => Ok(false),
+    }
 }
 
 fn row_to_delivery(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeliveryRecord> {
@@ -1069,6 +1358,27 @@ fn spawn_discovery(bind_addr: SocketAddr, public_url: Option<String>, state: App
     });
 }
 
+fn spawn_sync_loop(state: AppState) {
+    tokio::spawn(async move {
+        let initial_delay = 3 + (u64::from(state.key.node_id().as_bytes()[0]) % 17);
+        tokio::time::sleep(Duration::from_secs(initial_delay)).await;
+        sync_all_trusted(state.clone()).await;
+
+        let mut interval = tokio::time::interval(Duration::from_secs(SYNC_INTERVAL_SECS));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            sync_all_trusted(state.clone()).await;
+        }
+    });
+}
+
+async fn sync_all_trusted(state: AppState) {
+    for peer in trusted_peers(&state) {
+        let _ = sync_peer(&state, &peer, "default", None, MAX_SYNC_MESSAGES).await;
+    }
+}
+
 async fn discovery_loop(
     bind_addr: SocketAddr,
     public_url: Option<String>,
@@ -1261,7 +1571,26 @@ async fn verify_and_remember_peer(state: AppState, peer: PeerInfo, source: &'sta
     };
     if let Some(verified_peer) = verify_peer_identity(&client, &peer).await {
         let _ = remember_verified_peer(&state, verified_peer.clone(), source);
-        fetch_peer_list(state, verified_peer).await;
+        fetch_peer_list(state.clone(), verified_peer.clone()).await;
+        let _ = sync_peer(
+            &state,
+            &verified_peer_record(&verified_peer),
+            "default",
+            None,
+            MAX_SYNC_MESSAGES,
+        )
+        .await;
+    }
+}
+
+fn verified_peer_record(peer: &PeerInfo) -> PeerRecord {
+    PeerRecord {
+        node_url: peer.node_url.clone(),
+        node_id: peer.node_id.clone(),
+        name: peer.name.clone(),
+        last_seen_ms: now_ms(),
+        trust_state: PeerTrustState::Trusted,
+        source: "beacon".to_owned(),
     }
 }
 
@@ -1821,7 +2150,14 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
+    }
+
+    #[test]
+    fn sqlite_store_creates_sync_cursors() {
+        let state = test_state();
+        let conn = state.store.conn.lock().unwrap();
+        assert!(column_exists(&conn, "sync_cursors", "last_synced_ms").unwrap());
     }
 
     #[test]
@@ -2265,6 +2601,101 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn sync_requires_trusted_signed_request() {
+        let state = test_state();
+        let requester = NodeKey::from_seed_hex(&"02".repeat(32)).unwrap();
+        store_message(&state, state.key.sign_chat("default", 123, "hello")).unwrap();
+        let request = requester.sign_sync_request(&state.key.node_id(), "default", 0, 10, "nonce");
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/sync")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&request).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://peer".to_owned(),
+                node_id: requester.node_id(),
+                name: None,
+            },
+            "test",
+        )
+        .unwrap();
+        trust_peer_record(&state, &requester.node_id()).unwrap();
+        let wrong_target = requester.sign_sync_request(
+            &NodeKey::from_seed_hex(&"03".repeat(32)).unwrap().node_id(),
+            "default",
+            0,
+            10,
+            "nonce-2",
+        );
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/sync")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&wrong_target).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/sync")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&request).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let messages: MessagesResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(messages.messages.len(), 1);
+        assert_eq!(messages.messages[0].text, "hello");
+    }
+
+    #[test]
+    fn synced_messages_are_idempotent() {
+        let state = test_state();
+        let author = NodeKey::from_seed_hex(&"02".repeat(32)).unwrap();
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://peer".to_owned(),
+                node_id: author.node_id(),
+                name: None,
+            },
+            "test",
+        )
+        .unwrap();
+        trust_peer_record(&state, &author.node_id()).unwrap();
+        let message = author.sign_chat("default", 123, "hello");
+        assert!(import_synced_message(&state, message.clone()).unwrap());
+        assert!(!import_synced_message(&state, message).unwrap());
+        assert_eq!(list_messages(&state, "default", 0).unwrap().len(), 1);
     }
 
     #[test]
