@@ -73,6 +73,24 @@ pub enum Command {
         #[arg(long, default_value_t = 0)]
         after_ms: u64,
     },
+    Watch {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        agent_id: Option<String>,
+        #[arg(long, default_value = "")]
+        capabilities: String,
+        #[arg(long, default_value = "default")]
+        room: String,
+        #[arg(long)]
+        after_ms: Option<u64>,
+        #[arg(long, default_value_t = 10)]
+        interval_secs: u64,
+        #[arg(long, default_value_t = 30)]
+        heartbeat_secs: u64,
+        #[arg(long, default_value_t = 120)]
+        ttl_secs: u64,
+    },
 }
 
 #[derive(Debug, Subcommand, Eq, PartialEq)]
@@ -248,7 +266,43 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
             wait_secs,
         } => ask(client, &text, &room, wait_secs).await,
         Command::Chat { room, after_ms } => chat(client, &room, after_ms).await,
+        Command::Watch {
+            agent,
+            agent_id,
+            capabilities,
+            room,
+            after_ms,
+            interval_secs,
+            heartbeat_secs,
+            ttl_secs,
+        } => {
+            watch(
+                client,
+                WatchOptions {
+                    agent: &agent,
+                    agent_id: agent_id.as_deref(),
+                    capabilities: &capabilities,
+                    room: &room,
+                    after_ms,
+                    interval_secs,
+                    heartbeat_secs,
+                    ttl_secs,
+                },
+            )
+            .await
+        }
     }
+}
+
+struct WatchOptions<'a> {
+    agent: &'a str,
+    agent_id: Option<&'a str>,
+    capabilities: &'a str,
+    room: &'a str,
+    after_ms: Option<u64>,
+    interval_secs: u64,
+    heartbeat_secs: u64,
+    ttl_secs: u64,
 }
 
 fn update(
@@ -716,8 +770,25 @@ async fn agent_heartbeat(
     capabilities: &str,
     ttl_secs: u64,
 ) -> Result<String, CliError> {
+    let agent = heartbeat_agent(client, name, agent_id, capabilities, ttl_secs).await?;
+    Ok(format!(
+        "agent online name={} agent_id={} node={} expires_at_ms={}",
+        agent.name,
+        agent.agent_id,
+        short_id(&agent.node_id),
+        agent.expires_at_ms
+    ))
+}
+
+async fn heartbeat_agent(
+    client: &reqwest::Client,
+    name: &str,
+    agent_id: Option<&str>,
+    capabilities: &str,
+    ttl_secs: u64,
+) -> Result<AgentRecord, CliError> {
     let capabilities = parse_capabilities(capabilities);
-    let agent = client
+    Ok(client
         .post(format!("{}/v1/agents/heartbeat", node_url()))
         .json(&AgentHeartbeatRequest {
             agent_id,
@@ -729,14 +800,7 @@ async fn agent_heartbeat(
         .await?
         .error_for_status()?
         .json::<AgentRecord>()
-        .await?;
-    Ok(format!(
-        "agent online name={} agent_id={} node={} expires_at_ms={}",
-        agent.name,
-        agent.agent_id,
-        short_id(&agent.node_id),
-        agent.expires_at_ms
-    ))
+        .await?)
 }
 
 async fn agents(client: &reqwest::Client) -> Result<String, CliError> {
@@ -867,15 +931,61 @@ async fn chat(client: &reqwest::Client, room: &str, after_ms: u64) -> Result<Str
     let authors = author_trust(client).await?;
     Ok(messages
         .into_iter()
-        .map(|message| {
-            format!(
-                "{} {}",
-                message.created_at_ms,
-                format_message(&message, &authors)
-            )
-        })
+        .map(|message| format_chat_line(&message, &authors))
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+async fn watch(client: &reqwest::Client, options: WatchOptions<'_>) -> Result<String, CliError> {
+    if options.interval_secs == 0 || options.heartbeat_secs == 0 || options.ttl_secs == 0 {
+        return Err(CliError::NodeControlFailed(
+            "watch intervals and ttl must be greater than zero".to_owned(),
+        ));
+    }
+    let agent = heartbeat_agent(
+        client,
+        options.agent,
+        options.agent_id,
+        options.capabilities,
+        options.ttl_secs,
+    )
+    .await?;
+    let mut last_seen_ms = options.after_ms.unwrap_or_else(now_ms);
+    println!(
+        "watching room={} as {} ({}) node={} after_ms={}",
+        options.room,
+        agent.name,
+        agent.agent_id,
+        short_id(&agent.node_id),
+        last_seen_ms
+    );
+    let mut heartbeat_elapsed = 0_u64;
+    loop {
+        tokio::time::sleep(Duration::from_secs(options.interval_secs)).await;
+        heartbeat_elapsed = heartbeat_elapsed.saturating_add(options.interval_secs);
+        if heartbeat_elapsed >= options.heartbeat_secs {
+            heartbeat_agent(
+                client,
+                options.agent,
+                options.agent_id,
+                options.capabilities,
+                options.ttl_secs,
+            )
+            .await?;
+            heartbeat_elapsed = 0;
+        }
+        let messages = fetch_messages(client, options.room, last_seen_ms)
+            .await?
+            .messages;
+        if messages.is_empty() {
+            continue;
+        }
+        let authors = author_trust(client).await?;
+        for message in messages {
+            last_seen_ms = last_seen_ms.max(message.created_at_ms);
+            println!("{}", format_chat_line(&message, &authors));
+        }
+    }
 }
 
 async fn node_info(client: &reqwest::Client) -> Result<NodeInfoResponse, CliError> {
@@ -1124,6 +1234,14 @@ fn peer_url_label(peer: &PeerRecord) -> &str {
     }
 }
 
+fn format_chat_line(message: &ChatMessage, authors: &BTreeMap<String, String>) -> String {
+    format!(
+        "{} {}",
+        message.created_at_ms,
+        format_message(message, authors)
+    )
+}
+
 fn format_message(message: &ChatMessage, authors: &BTreeMap<String, String>) -> String {
     let label = authors
         .get(&message.author_node_id)
@@ -1258,6 +1376,44 @@ mod tests {
             Cli {
                 command: Command::Deliveries {
                     message_id: "a".repeat(64),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_watch() {
+        assert_eq!(
+            Cli::parse_from([
+                "hive",
+                "watch",
+                "--agent",
+                "Pi",
+                "--agent-id",
+                "pi-session",
+                "--capabilities",
+                "rust,review",
+                "--room",
+                "ops",
+                "--after-ms",
+                "123",
+                "--interval-secs",
+                "5",
+                "--heartbeat-secs",
+                "15",
+                "--ttl-secs",
+                "60"
+            ]),
+            Cli {
+                command: Command::Watch {
+                    agent: "Pi".to_owned(),
+                    agent_id: Some("pi-session".to_owned()),
+                    capabilities: "rust,review".to_owned(),
+                    room: "ops".to_owned(),
+                    after_ms: Some(123),
+                    interval_secs: 5,
+                    heartbeat_secs: 15,
+                    ttl_secs: 60,
                 }
             }
         );

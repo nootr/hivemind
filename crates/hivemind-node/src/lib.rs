@@ -11,6 +11,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use get_if_addrs::{get_if_addrs, IfAddr};
 use hivemind_core::{
     inbound_decision, valid_node_id, AgentRecord, ChatMessage, DeliveryRecord, DeliveryStatus,
     InboundDecision, NodeKey, NodeProof, PeerInfo, PeerRecord, PeerTrustState,
@@ -1109,14 +1110,38 @@ async fn beacon(
     public_url: Option<&str>,
     state: &AppState,
 ) {
-    let targets = [
-        SocketAddr::from((Ipv4Addr::BROADCAST, DISCOVERY_PORT)),
-        SocketAddr::from((Ipv4Addr::LOCALHOST, DISCOVERY_PORT)),
-    ];
-    for target in targets {
+    for target in discovery_targets() {
         let peer = self_peer(bind_addr, public_url, state, target);
         let _ = socket.send_to(beacon_text(&peer).as_bytes(), target).await;
     }
+}
+
+fn discovery_targets() -> Vec<SocketAddr> {
+    let mut targets = vec![
+        SocketAddr::from((Ipv4Addr::BROADCAST, DISCOVERY_PORT)),
+        SocketAddr::from((Ipv4Addr::LOCALHOST, DISCOVERY_PORT)),
+    ];
+    if let Ok(interfaces) = get_if_addrs() {
+        for interface in interfaces {
+            if let IfAddr::V4(addr) = interface.addr {
+                if addr.ip.is_loopback() || addr.ip.is_unspecified() {
+                    continue;
+                }
+                let broadcast = addr
+                    .broadcast
+                    .unwrap_or_else(|| directed_broadcast(addr.ip, addr.netmask));
+                let target = SocketAddr::from((broadcast, DISCOVERY_PORT));
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+        }
+    }
+    targets
+}
+
+fn directed_broadcast(ip: Ipv4Addr, netmask: Ipv4Addr) -> Ipv4Addr {
+    Ipv4Addr::from(u32::from(ip) | !u32::from(netmask))
 }
 
 fn self_peer(
@@ -1566,6 +1591,17 @@ mod tests {
         proof.verify().unwrap();
         assert_eq!(proof.node_url, "http://127.0.0.1:7747");
         assert_eq!(proof.nonce, "abc");
+    }
+
+    #[test]
+    fn computes_directed_broadcast() {
+        assert_eq!(
+            directed_broadcast(
+                Ipv4Addr::new(10, 0, 1, 121),
+                Ipv4Addr::new(255, 255, 255, 0)
+            ),
+            Ipv4Addr::new(10, 0, 1, 255)
+        );
     }
 
     #[test]
