@@ -570,6 +570,7 @@ name = "hivemind-cli"
 version = "0.1.5"
 dependencies = [
  "clap",
+ "get_if_addrs",
  "hivemind-core",
  "reqwest",
  "serde",

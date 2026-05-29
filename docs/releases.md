@@ -6,6 +6,8 @@ GitHub Actions builds prebuilt HIVEMIND binaries for tagged releases.
 
 Planned release contents:
 
+- `hive doctor` diagnostics for node/discovery/peer/agent state;
+- `hive scan <cidr>` safe subnet fallback discovery;
 - `hive --version` and `hive -v` version output;
 - `hive chat --follow` / `hive chat -f` polling stream mode.
 

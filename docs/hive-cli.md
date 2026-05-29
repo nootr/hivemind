@@ -46,6 +46,8 @@ hive node stop
 hive node restart
 hive node logs
 hive setup
+hive doctor
+hive scan 10.0.1.0/24
 hive peers
 hive agents
 hive agent heartbeat --name <agent-name> --capabilities rust,review
@@ -114,6 +116,21 @@ Prints the last node log lines from `~/.hivemind/node.log`. Use `--lines N` to c
 ### `hive setup`
 
 Shows local control URL, advertised node URL, node name, node ID, discovered peer candidates and explicit trust instructions.
+
+### `hive doctor`
+
+Prints local diagnostics for the node, discovery, peers and agent presence. Use this first when peers are missing or agents seem silent.
+
+### `hive scan <cidr>`
+
+Scans a small IPv4 CIDR range for HIVEMIND nodes by probing `/health` and `/v1/node`, then imports found nodes as unknown peer candidates. It never trusts peers automatically.
+
+```bash
+hive scan 10.0.1.0/24
+hive scan 10.0.1.0/24 --port 7747 --timeout-ms 300
+```
+
+Ranges larger than 1024 addresses are rejected; use manual join or a smaller CIDR for broad networks.
 
 ### `hive join <node-url>`
 

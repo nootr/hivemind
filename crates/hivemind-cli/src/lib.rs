@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use get_if_addrs::{get_if_addrs, IfAddr};
 use hivemind_core::{
     encode_message_text, split_message_text, valid_node_id, AgentRecord, ChatMessage,
     DeliveryRecord, MessageKind, MessageMeta, PeerInfo, PeerRecord, PeerTrustState, ReceiptAction,
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     env, fs,
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     time::Duration,
@@ -30,6 +32,14 @@ pub struct Cli {
 #[derive(Debug, Subcommand, Eq, PartialEq)]
 pub enum Command {
     Setup,
+    Doctor,
+    Scan {
+        cidr: String,
+        #[arg(long, default_value_t = 7747)]
+        port: u16,
+        #[arg(long, default_value_t = 300)]
+        timeout_ms: u64,
+    },
     Peers,
     Agents,
     Agent {
@@ -292,6 +302,12 @@ where
 pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliError> {
     match cli.command {
         Command::Setup => setup(client).await,
+        Command::Doctor => doctor(client).await,
+        Command::Scan {
+            cidr,
+            port,
+            timeout_ms,
+        } => scan(client, &cidr, port, timeout_ms).await,
         Command::Peers => peers(client).await,
         Command::Agents => agents(client).await,
         Command::Agent { command } => match command {
@@ -902,6 +918,188 @@ async fn peers(client: &reqwest::Client) -> Result<String, CliError> {
         .join("\n"))
 }
 
+async fn doctor(client: &reqwest::Client) -> Result<String, CliError> {
+    let mut lines = vec![
+        "Hive doctor".to_owned(),
+        format!("cli_version: {}", env!("CARGO_PKG_VERSION")),
+        format!("local_control_url: {}", node_url()),
+    ];
+    let health = node_health(client).await;
+    lines.push(format!(
+        "node_health: {}",
+        if health { "ok" } else { "failed" }
+    ));
+    if !health {
+        lines.push("hint: start the node with `hive node start`".to_owned());
+        return Ok(lines.join("\n"));
+    }
+
+    match node_info(client).await {
+        Ok(node) => {
+            lines.push(format!("advertised_node_url: {}", node.node_url));
+            lines.push(format!(
+                "node_name: {}",
+                node.name.as_deref().unwrap_or("unknown")
+            ));
+            lines.push(format!("node_id: {}", node.node_id));
+        }
+        Err(err) => lines.push(format!("node_info: failed ({err})")),
+    }
+
+    lines.push("".to_owned());
+    lines.push("Discovery".to_owned());
+    lines.push("udp_port: 7748".to_owned());
+    lines.push(format!(
+        "broadcast_targets: {}",
+        broadcast_targets().join(", ")
+    ));
+    lines.extend(interface_lines());
+
+    lines.push("".to_owned());
+    lines.push("Peers".to_owned());
+    match fetch_peers(client).await {
+        Ok(response) => {
+            let trusted = response
+                .peers
+                .iter()
+                .filter(|peer| peer.trust_state == PeerTrustState::Trusted)
+                .count();
+            let unknown = response
+                .peers
+                .iter()
+                .filter(|peer| peer.trust_state == PeerTrustState::Unknown)
+                .count();
+            let blocked = response
+                .peers
+                .iter()
+                .filter(|peer| peer.trust_state == PeerTrustState::Blocked)
+                .count();
+            lines.push(format!(
+                "peer_counts: trusted={trusted} unknown={unknown} blocked={blocked} total={}",
+                response.peers.len()
+            ));
+            if response.peers.is_empty() {
+                lines.push("hint: keep nodes on the same LAN running, or use `hive scan <cidr>` / `hive join <node-url>`".to_owned());
+            }
+        }
+        Err(err) => lines.push(format!("peers: failed ({err})")),
+    }
+
+    lines.push("".to_owned());
+    lines.push("Agents".to_owned());
+    match aggregate_agents(client).await {
+        Ok(agent_views) => {
+            let now = now_ms();
+            let active = agent_views
+                .iter()
+                .filter(|view| view.agent.expires_at_ms > now)
+                .count();
+            lines.push(format!(
+                "agent_counts: active={active} total={}",
+                agent_views.len()
+            ));
+            if active == 0 {
+                lines.push("hint: active agents should run `hive watch --agent <name>` or heartbeat periodically".to_owned());
+            }
+        }
+        Err(err) => lines.push(format!("agents: failed ({err})")),
+    }
+
+    lines.push("".to_owned());
+    lines.push("Common fixes".to_owned());
+    lines.push("- allow TCP 7747 and UDP 7748 on local firewalls".to_owned());
+    lines.push("- disable Wi-Fi/AP client isolation for LAN discovery".to_owned());
+    lines.push(
+        "- if UDP discovery is filtered, run `hive scan <cidr>` or `hive join <node-url>`"
+            .to_owned(),
+    );
+    Ok(lines.join("\n"))
+}
+
+async fn scan(
+    client: &reqwest::Client,
+    cidr: &str,
+    port: u16,
+    timeout_ms: u64,
+) -> Result<String, CliError> {
+    let cidr = parse_ipv4_cidr(cidr)?;
+    let hosts = cidr.hosts()?;
+    let local_node_id = node_info(client).await.ok().map(|node| node.node_id);
+    let scan_client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms.max(1)))
+        .build()?;
+    let mut lines = vec![format!(
+        "scanning {} hosts in {}/{} on port {}",
+        hosts.len(),
+        cidr.network,
+        cidr.prefix,
+        port
+    )];
+    let mut found = 0_usize;
+    let mut imported = 0_usize;
+    for ip in hosts {
+        let base_url = format!("http://{ip}:{port}");
+        let Ok(node) = fetch_node_from(&scan_client, &base_url).await else {
+            continue;
+        };
+        if local_node_id.as_deref() == Some(node.node_id.as_str()) {
+            continue;
+        }
+        found += 1;
+        let peer = PeerInfo {
+            node_url: base_url.clone(),
+            node_id: node.node_id.clone(),
+            name: node.name.clone(),
+        };
+        let imported_peer = client
+            .post(format!("{}/v1/peers", node_url()))
+            .json(&peer)
+            .send()
+            .await;
+        let status = match imported_peer {
+            Ok(response) if response.status().is_success() => {
+                imported += 1;
+                "imported"
+            }
+            Ok(response) => {
+                lines.push(format!(
+                    "found short={} url={} import=failed status={}",
+                    short_id(&node.node_id),
+                    peer.node_url,
+                    response.status()
+                ));
+                continue;
+            }
+            Err(err) => {
+                lines.push(format!(
+                    "found short={} url={} import=failed error={}",
+                    short_id(&node.node_id),
+                    peer.node_url,
+                    err
+                ));
+                continue;
+            }
+        };
+        lines.push(format!(
+            "found short={} node_id={} url={} advertised_url={} name={} {status}",
+            short_id(&node.node_id),
+            node.node_id,
+            peer.node_url,
+            node.node_url,
+            node.name.as_deref().unwrap_or("unknown")
+        ));
+    }
+    if found == 0 {
+        lines.push("no hivemind nodes found".to_owned());
+    }
+    lines.push(format!("summary: found={found} imported={imported}"));
+    lines.push(
+        "discovery is not trust; verify node IDs out-of-band before `hive peer trust <node-id>`"
+            .to_owned(),
+    );
+    Ok(lines.join("\n"))
+}
+
 async fn deliveries(client: &reqwest::Client, message_id: &str) -> Result<String, CliError> {
     let deliveries = fetch_deliveries(client, message_id).await?.deliveries;
     if deliveries.is_empty() {
@@ -1398,6 +1596,25 @@ async fn fetch_deliveries(
         .await?)
 }
 
+async fn fetch_node_from(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<NodeInfoResponse, CliError> {
+    let base_url = base_url.trim_end_matches('/');
+    client
+        .get(format!("{base_url}/health"))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(client
+        .get(format!("{base_url}/v1/node"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<NodeInfoResponse>()
+        .await?)
+}
+
 async fn fetch_agents_from(
     client: &reqwest::Client,
     base_url: &str,
@@ -1478,6 +1695,115 @@ fn format_peer_line(peer: &PeerRecord) -> String {
         peer.source,
         peer.last_seen_ms
     )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Ipv4Cidr {
+    network: Ipv4Addr,
+    prefix: u8,
+}
+
+impl Ipv4Cidr {
+    fn hosts(self) -> Result<Vec<Ipv4Addr>, CliError> {
+        if self.prefix > 32 {
+            return Err(CliError::NodeControlFailed(
+                "invalid CIDR prefix".to_owned(),
+            ));
+        }
+        let size = if self.prefix == 0 {
+            u32::MAX as u64 + 1
+        } else {
+            1_u64 << (32 - self.prefix)
+        };
+        if size > 1024 {
+            return Err(CliError::NodeControlFailed(
+                "scan range too large; use /22 or smaller".to_owned(),
+            ));
+        }
+        let base = u32::from(self.network) & cidr_mask(self.prefix);
+        let start = if self.prefix <= 30 { 1 } else { 0 };
+        let end_exclusive = if self.prefix <= 30 { size - 1 } else { size };
+        Ok((start..end_exclusive)
+            .map(|offset| Ipv4Addr::from(base.saturating_add(offset as u32)))
+            .collect())
+    }
+}
+
+fn parse_ipv4_cidr(input: &str) -> Result<Ipv4Cidr, CliError> {
+    let (ip, prefix) = input
+        .split_once('/')
+        .ok_or_else(|| CliError::NodeControlFailed("CIDR must look like 10.0.1.0/24".to_owned()))?;
+    let ip = ip
+        .parse::<Ipv4Addr>()
+        .map_err(|_| CliError::NodeControlFailed("invalid IPv4 address".to_owned()))?;
+    let prefix = prefix
+        .parse::<u8>()
+        .map_err(|_| CliError::NodeControlFailed("invalid CIDR prefix".to_owned()))?;
+    if prefix > 32 {
+        return Err(CliError::NodeControlFailed(
+            "invalid CIDR prefix".to_owned(),
+        ));
+    }
+    Ok(Ipv4Cidr {
+        network: Ipv4Addr::from(u32::from(ip) & cidr_mask(prefix)),
+        prefix,
+    })
+}
+
+fn cidr_mask(prefix: u8) -> u32 {
+    if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    }
+}
+
+fn interface_lines() -> Vec<String> {
+    let Ok(interfaces) = get_if_addrs() else {
+        return vec!["interfaces: unavailable".to_owned()];
+    };
+    interfaces
+        .into_iter()
+        .filter_map(|interface| match interface.addr {
+            IfAddr::V4(addr) => Some(format!(
+                "interface={} ip={} netmask={} broadcast={}",
+                interface.name,
+                addr.ip,
+                addr.netmask,
+                addr.broadcast
+                    .unwrap_or_else(|| directed_broadcast(addr.ip, addr.netmask))
+            )),
+            IfAddr::V6(_) => None,
+        })
+        .collect()
+}
+
+fn broadcast_targets() -> Vec<String> {
+    let mut targets = vec![
+        "255.255.255.255:7748".to_owned(),
+        "127.0.0.1:7748".to_owned(),
+    ];
+    if let Ok(interfaces) = get_if_addrs() {
+        for interface in interfaces {
+            if let IfAddr::V4(addr) = interface.addr {
+                if addr.ip.is_loopback() || addr.ip.is_unspecified() {
+                    continue;
+                }
+                let broadcast = addr
+                    .broadcast
+                    .unwrap_or_else(|| directed_broadcast(addr.ip, addr.netmask));
+                let target = format!("{broadcast}:7748");
+                if !targets.iter().any(|existing| existing == &target) {
+                    targets.push(target);
+                }
+            }
+        }
+    }
+    targets
+}
+
+fn directed_broadcast(ip: Ipv4Addr, netmask: Ipv4Addr) -> Ipv4Addr {
+    Ipv4Addr::from(u32::from(ip) | !u32::from(netmask))
 }
 
 fn format_inbox_item(item: &InboxQuestion, authors: &BTreeMap<String, String>) -> String {
@@ -1804,6 +2130,45 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn parses_doctor_and_scan() {
+        assert_eq!(
+            Cli::parse_from(["hive", "doctor"]),
+            Cli {
+                command: Command::Doctor
+            }
+        );
+        assert_eq!(
+            Cli::parse_from([
+                "hive",
+                "scan",
+                "10.0.1.0/24",
+                "--port",
+                "17747",
+                "--timeout-ms",
+                "50"
+            ]),
+            Cli {
+                command: Command::Scan {
+                    cidr: "10.0.1.0/24".to_owned(),
+                    port: 17747,
+                    timeout_ms: 50,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_ipv4_cidr_hosts() {
+        let cidr = parse_ipv4_cidr("10.0.1.4/30").unwrap();
+        assert_eq!(cidr.network, Ipv4Addr::new(10, 0, 1, 4));
+        assert_eq!(
+            cidr.hosts().unwrap(),
+            vec![Ipv4Addr::new(10, 0, 1, 5), Ipv4Addr::new(10, 0, 1, 6)]
+        );
+        assert!(parse_ipv4_cidr("10.0.1.0/16").unwrap().hosts().is_err());
     }
 
     #[test]
