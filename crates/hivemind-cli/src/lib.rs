@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
-use hivemind_core::{valid_node_id, ChatMessage, PeerInfo, PeerRecord};
+use hivemind_core::{
+    valid_node_id, AgentRecord, ChatMessage, DeliveryRecord, PeerInfo, PeerRecord, PeerTrustState,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -24,6 +26,14 @@ pub struct Cli {
 pub enum Command {
     Setup,
     Peers,
+    Agents,
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+    Deliveries {
+        message_id: String,
+    },
     Update {
         #[arg(long)]
         repo_url: Option<String>,
@@ -107,6 +117,20 @@ pub enum PeerCommand {
     Deny { node_id: String },
 }
 
+#[derive(Debug, Subcommand, Eq, PartialEq)]
+pub enum AgentCommand {
+    Heartbeat {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        agent_id: Option<String>,
+        #[arg(long, default_value = "")]
+        capabilities: String,
+        #[arg(long, default_value_t = 120)]
+        ttl_secs: u64,
+    },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
     #[error("request failed: {0}")]
@@ -135,6 +159,14 @@ struct SayRequest<'a> {
     room: &'a str,
 }
 
+#[derive(Debug, Serialize)]
+struct AgentHeartbeatRequest<'a> {
+    agent_id: Option<&'a str>,
+    name: &'a str,
+    capabilities: Vec<String>,
+    ttl_secs: u64,
+}
+
 #[derive(Debug, Deserialize)]
 struct NodeInfoResponse {
     node_url: String,
@@ -153,6 +185,16 @@ struct MessagesResponse {
     messages: Vec<ChatMessage>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DeliveriesResponse {
+    deliveries: Vec<DeliveryRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentsResponse {
+    agents: Vec<AgentRecord>,
+}
+
 pub async fn run() -> Result<(), CliError> {
     let cli = Cli::parse();
     let output = execute(cli, &reqwest::Client::new()).await?;
@@ -164,6 +206,16 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
     match cli.command {
         Command::Setup => setup(client).await,
         Command::Peers => peers(client).await,
+        Command::Agents => agents(client).await,
+        Command::Agent { command } => match command {
+            AgentCommand::Heartbeat {
+                name,
+                agent_id,
+                capabilities,
+                ttl_secs,
+            } => agent_heartbeat(client, &name, agent_id.as_deref(), &capabilities, ttl_secs).await,
+        },
+        Command::Deliveries { message_id } => deliveries(client, &message_id).await,
         Command::Update {
             repo_url,
             branch,
@@ -645,6 +697,60 @@ async fn peers(client: &reqwest::Client) -> Result<String, CliError> {
         .join("\n"))
 }
 
+async fn deliveries(client: &reqwest::Client, message_id: &str) -> Result<String, CliError> {
+    let deliveries = fetch_deliveries(client, message_id).await?.deliveries;
+    if deliveries.is_empty() {
+        return Ok("no delivery records".to_owned());
+    }
+    Ok(deliveries
+        .into_iter()
+        .map(|delivery| format_delivery_line(&delivery))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+async fn agent_heartbeat(
+    client: &reqwest::Client,
+    name: &str,
+    agent_id: Option<&str>,
+    capabilities: &str,
+    ttl_secs: u64,
+) -> Result<String, CliError> {
+    let capabilities = parse_capabilities(capabilities);
+    let agent = client
+        .post(format!("{}/v1/agents/heartbeat", node_url()))
+        .json(&AgentHeartbeatRequest {
+            agent_id,
+            name,
+            capabilities,
+            ttl_secs,
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<AgentRecord>()
+        .await?;
+    Ok(format!(
+        "agent online name={} agent_id={} node={} expires_at_ms={}",
+        agent.name,
+        agent.agent_id,
+        short_id(&agent.node_id),
+        agent.expires_at_ms
+    ))
+}
+
+async fn agents(client: &reqwest::Client) -> Result<String, CliError> {
+    let agent_views = aggregate_agents(client).await?;
+    if agent_views.is_empty() {
+        return Ok("no agents seen".to_owned());
+    }
+    Ok(agent_views
+        .into_iter()
+        .map(|view| format_agent_line(&view))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 async fn trust_peer(client: &reqwest::Client, node_id: &str) -> Result<String, CliError> {
     update_peer_state(client, node_id, "trust", "trusted").await
 }
@@ -678,15 +784,23 @@ async fn update_peer_state(
     ))
 }
 
-async fn say(client: &reqwest::Client, text: &str, room: &str) -> Result<String, CliError> {
-    let message = client
+async fn send_message(
+    client: &reqwest::Client,
+    text: &str,
+    room: &str,
+) -> Result<ChatMessage, CliError> {
+    Ok(client
         .post(format!("{}/v1/chat", node_url()))
         .json(&SayRequest { text, room })
         .send()
         .await?
         .error_for_status()?
         .json::<ChatMessage>()
-        .await?;
+        .await?)
+}
+
+async fn say(client: &reqwest::Client, text: &str, room: &str) -> Result<String, CliError> {
+    let message = send_message(client, text, room).await?;
     Ok(format!("sent {}", message.id))
 }
 
@@ -697,13 +811,50 @@ async fn ask(
     wait_secs: u64,
 ) -> Result<String, CliError> {
     let since = now_ms();
-    let sent = say(client, text, room).await?;
+    let trusted = trusted_peers(client).await?;
+    let message = send_message(client, text, room).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let initial_deliveries = fetch_deliveries(client, &message.id).await?.deliveries;
+    let local_node_id = node_info(client).await?.node_id;
+    let agent_views = aggregate_agents(client).await?;
+    let active_agents = agent_views
+        .iter()
+        .filter(|view| view.agent.node_id != local_node_id && view.agent.expires_at_ms > now_ms())
+        .count();
+
+    let mut lines = vec![
+        format!("sent {}", message.id),
+        format!("trusted nodes: {}", trusted.len()),
+        format!(
+            "delivered nodes: {}/{}",
+            delivered_count(&initial_deliveries),
+            trusted.len()
+        ),
+        format!("active responder agents: {}", active_agents),
+        "".to_owned(),
+        "Deliveries:".to_owned(),
+    ];
+    lines.extend(format_delivery_summary(&trusted, &initial_deliveries));
+    lines.push("".to_owned());
+    lines.push(format!("Waiting {wait_secs}s for replies..."));
+
     tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+    let final_deliveries = fetch_deliveries(client, &message.id).await?.deliveries;
     let replies = fetch_messages(client, room, since).await?.messages;
     let authors = author_trust(client).await?;
-    let mut lines = vec![sent, "".to_owned(), "Replies:".to_owned()];
+
+    lines.push("".to_owned());
+    lines.push("Final deliveries:".to_owned());
+    lines.extend(format_delivery_summary(&trusted, &final_deliveries));
+    lines.push("".to_owned());
+    lines.push("Replies:".to_owned());
+    let mut reply_count = 0;
     for reply in replies.into_iter().filter(|message| message.text != text) {
         lines.push(format_message(&reply, &authors));
+        reply_count += 1;
+    }
+    if reply_count == 0 {
+        lines.push("no replies".to_owned());
     }
     Ok(lines.join("\n"))
 }
@@ -766,6 +917,78 @@ async fn fetch_messages(
         .await?)
 }
 
+async fn fetch_deliveries(
+    client: &reqwest::Client,
+    message_id: &str,
+) -> Result<DeliveriesResponse, CliError> {
+    Ok(client
+        .get(format!("{}/v1/deliveries/{message_id}", node_url()))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<DeliveriesResponse>()
+        .await?)
+}
+
+async fn fetch_agents_from(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<AgentsResponse, CliError> {
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        client
+            .get(format!("{}/v1/agents", base_url.trim_end_matches('/')))
+            .send(),
+    )
+    .await
+    .map_err(|err| CliError::NodeControlFailed(format!("agent fetch timeout: {err}")))??;
+    Ok(response
+        .error_for_status()?
+        .json::<AgentsResponse>()
+        .await?)
+}
+
+async fn trusted_peers(client: &reqwest::Client) -> Result<Vec<PeerRecord>, CliError> {
+    Ok(fetch_peers(client)
+        .await?
+        .peers
+        .into_iter()
+        .filter(|peer| peer.trust_state == PeerTrustState::Trusted)
+        .collect())
+}
+
+#[derive(Debug)]
+struct AgentView {
+    agent: AgentRecord,
+    node_url: String,
+}
+
+async fn aggregate_agents(client: &reqwest::Client) -> Result<Vec<AgentView>, CliError> {
+    let mut views = Vec::new();
+    if let Ok(response) = fetch_agents_from(client, &node_url()).await {
+        views.extend(response.agents.into_iter().map(|agent| AgentView {
+            agent,
+            node_url: node_url(),
+        }));
+    }
+    for peer in trusted_peers(client).await? {
+        if let Ok(response) = fetch_agents_from(client, &peer.node_url).await {
+            views.extend(response.agents.into_iter().map(|agent| AgentView {
+                agent,
+                node_url: peer.node_url.clone(),
+            }));
+        }
+    }
+    views.sort_by(|a, b| {
+        b.agent
+            .expires_at_ms
+            .cmp(&a.agent.expires_at_ms)
+            .then_with(|| a.agent.name.cmp(&b.agent.name))
+            .then_with(|| a.agent.agent_id.cmp(&b.agent.agent_id))
+    });
+    Ok(views)
+}
+
 async fn author_trust(client: &reqwest::Client) -> Result<BTreeMap<String, String>, CliError> {
     let mut authors = BTreeMap::new();
     let node = node_info(client).await?;
@@ -787,6 +1010,110 @@ fn format_peer_line(peer: &PeerRecord) -> String {
         peer.source,
         peer.last_seen_ms
     )
+}
+
+fn format_delivery_line(delivery: &DeliveryRecord) -> String {
+    let mut line = format!(
+        "{}\tpeer={}\turl={}\tattempted_at_ms={}",
+        delivery.status.as_str(),
+        short_id(&delivery.peer_node_id),
+        delivery.peer_url,
+        delivery.attempted_at_ms
+    );
+    if let Some(delivered_at_ms) = delivery.delivered_at_ms {
+        line.push_str(&format!("\tdelivered_at_ms={delivered_at_ms}"));
+    }
+    if let Some(error) = &delivery.error {
+        line.push_str(&format!("\terror={error}"));
+    }
+    line
+}
+
+fn delivered_count(deliveries: &[DeliveryRecord]) -> usize {
+    deliveries
+        .iter()
+        .filter(|delivery| delivery.status.as_str() == "delivered")
+        .count()
+}
+
+fn format_delivery_summary(trusted: &[PeerRecord], deliveries: &[DeliveryRecord]) -> Vec<String> {
+    if trusted.is_empty() {
+        return vec!["  no trusted peers".to_owned()];
+    }
+    trusted
+        .iter()
+        .map(|peer| {
+            let delivery = deliveries
+                .iter()
+                .find(|delivery| delivery.peer_node_id == peer.node_id);
+            match delivery {
+                Some(delivery) => {
+                    let mut line = format!(
+                        "  {} {} {}",
+                        status_mark(delivery.status.as_str()),
+                        delivery.status.as_str(),
+                        peer_label(peer)
+                    );
+                    if let Some(error) = &delivery.error {
+                        line.push_str(&format!(" ({error})"));
+                    }
+                    line
+                }
+                None => format!("  ? not-recorded {}", peer_label(peer)),
+            }
+        })
+        .collect()
+}
+
+fn status_mark(status: &str) -> &'static str {
+    match status {
+        "delivered" => "✓",
+        "failed" => "✗",
+        "pending" => "…",
+        _ => "?",
+    }
+}
+
+fn peer_label(peer: &PeerRecord) -> String {
+    format!(
+        "{} {}",
+        peer.name.as_deref().unwrap_or("unknown"),
+        short_id(&peer.node_id)
+    )
+}
+
+fn format_agent_line(view: &AgentView) -> String {
+    let now = now_ms();
+    let status = if view.agent.expires_at_ms > now {
+        "active"
+    } else {
+        "stale"
+    };
+    let capabilities = if view.agent.capabilities.is_empty() {
+        "none".to_owned()
+    } else {
+        view.agent.capabilities.join(",")
+    };
+    format!(
+        "{}\tname={}\tagent_id={}\tnode={}\turl={}\tlast_seen_ms={}\texpires_at_ms={}\tcapabilities={}",
+        status,
+        view.agent.name,
+        view.agent.agent_id,
+        short_id(&view.agent.node_id),
+        view.node_url,
+        view.agent.last_seen_ms,
+        view.agent.expires_at_ms,
+        capabilities
+    )
+}
+
+fn parse_capabilities(input: &str) -> Vec<String> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|capability| !capability.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn peer_url_label(peer: &PeerRecord) -> &str {
@@ -880,6 +1207,57 @@ mod tests {
                     branch: Some("main".to_owned()),
                     tag: None,
                     rev: None,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_agents() {
+        assert_eq!(
+            Cli::parse_from(["hive", "agents"]),
+            Cli {
+                command: Command::Agents
+            }
+        );
+    }
+
+    #[test]
+    fn parses_agent_heartbeat() {
+        assert_eq!(
+            Cli::parse_from([
+                "hive",
+                "agent",
+                "heartbeat",
+                "--name",
+                "Pi",
+                "--agent-id",
+                "pi-session",
+                "--capabilities",
+                "rust,review",
+                "--ttl-secs",
+                "300"
+            ]),
+            Cli {
+                command: Command::Agent {
+                    command: AgentCommand::Heartbeat {
+                        name: "Pi".to_owned(),
+                        agent_id: Some("pi-session".to_owned()),
+                        capabilities: "rust,review".to_owned(),
+                        ttl_secs: 300,
+                    }
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_deliveries() {
+        assert_eq!(
+            Cli::parse_from(["hive", "deliveries", &"a".repeat(64)]),
+            Cli {
+                command: Command::Deliveries {
+                    message_id: "a".repeat(64),
                 }
             }
         );
