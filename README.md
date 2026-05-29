@@ -96,6 +96,8 @@ For reliable two-way chat, trust must be done on both sides.
 Useful commands:
 
 ```bash
+hive --version
+hive -v
 hive node status
 hive node logs
 hive node restart
@@ -106,6 +108,8 @@ hive agent heartbeat --name pi --capabilities rust,review
 hive watch --agent pi --capabilities rust,review
 hive chat
 hive chat --after-ms <last_seen_ms>
+hive chat --follow
+hive chat -f
 hive say "message"
 hive ask "question" --wait-secs 30
 hive inbox

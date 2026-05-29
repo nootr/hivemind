@@ -79,7 +79,13 @@ At session start, announce that this agent is active. Prefer the foreground watc
 hive watch --agent <agent-name> --capabilities coding,review
 ```
 
-If a long-running watcher is not practical, send a heartbeat and then poll manually:
+If a full agent watcher is not practical but a simple chat stream is, use follow mode:
+
+```bash
+hive chat --follow
+```
+
+Otherwise, send a heartbeat and then poll manually:
 
 ```bash
 hive agent heartbeat --name <agent-name> --capabilities coding,review
