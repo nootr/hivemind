@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use hivemind_core::{
-    valid_node_id, AgentRecord, ChatMessage, DeliveryRecord, PeerInfo, PeerRecord, PeerTrustState,
+    encode_message_text, split_message_text, valid_node_id, AgentRecord, ChatMessage,
+    DeliveryRecord, MessageKind, MessageMeta, PeerInfo, PeerRecord, PeerTrustState, ReceiptAction,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -59,6 +60,14 @@ pub enum Command {
         text: String,
         #[arg(long, default_value = "default")]
         room: String,
+        #[arg(long)]
+        reply_to: Option<String>,
+    },
+    Answer {
+        message_id: String,
+        text: String,
+        #[arg(long, default_value = "default")]
+        room: String,
     },
     Ask {
         text: String,
@@ -72,6 +81,42 @@ pub enum Command {
         room: String,
         #[arg(long, default_value_t = 0)]
         after_ms: u64,
+    },
+    Inbox {
+        #[arg(long, default_value = "default")]
+        room: String,
+        #[arg(long)]
+        all: bool,
+    },
+    Read {
+        message_id: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long, default_value = "default")]
+        room: String,
+    },
+    Claim {
+        message_id: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long, default_value = "default")]
+        room: String,
+    },
+    Done {
+        message_id: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long, default_value = "default")]
+        room: String,
+    },
+    Decline {
+        message_id: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, default_value = "default")]
+        room: String,
     },
     Watch {
         #[arg(long)]
@@ -259,13 +304,84 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
             PeerCommand::Trust { node_id } => trust_peer(client, &node_id).await,
             PeerCommand::Deny { node_id } => deny_peer(client, &node_id).await,
         },
-        Command::Say { text, room } => say(client, &text, &room).await,
+        Command::Say {
+            text,
+            room,
+            reply_to,
+        } => say(client, &text, &room, reply_to.as_deref()).await,
+        Command::Answer {
+            message_id,
+            text,
+            room,
+        } => answer(client, &message_id, &text, &room).await,
         Command::Ask {
             text,
             room,
             wait_secs,
         } => ask(client, &text, &room, wait_secs).await,
         Command::Chat { room, after_ms } => chat(client, &room, after_ms).await,
+        Command::Inbox { room, all } => inbox(client, &room, all).await,
+        Command::Read {
+            message_id,
+            agent,
+            room,
+        } => {
+            receipt(
+                client,
+                ReceiptAction::Read,
+                &message_id,
+                &agent,
+                None,
+                &room,
+            )
+            .await
+        }
+        Command::Claim {
+            message_id,
+            agent,
+            room,
+        } => {
+            receipt(
+                client,
+                ReceiptAction::Claim,
+                &message_id,
+                &agent,
+                None,
+                &room,
+            )
+            .await
+        }
+        Command::Done {
+            message_id,
+            agent,
+            room,
+        } => {
+            receipt(
+                client,
+                ReceiptAction::Done,
+                &message_id,
+                &agent,
+                None,
+                &room,
+            )
+            .await
+        }
+        Command::Decline {
+            message_id,
+            agent,
+            reason,
+            room,
+        } => {
+            receipt(
+                client,
+                ReceiptAction::Decline,
+                &message_id,
+                &agent,
+                reason.as_deref(),
+                &room,
+            )
+            .await
+        }
         Command::Watch {
             agent,
             agent_id,
@@ -863,9 +979,84 @@ async fn send_message(
         .await?)
 }
 
-async fn say(client: &reqwest::Client, text: &str, room: &str) -> Result<String, CliError> {
-    let message = send_message(client, text, room).await?;
+fn encode_meta_text(meta: MessageMeta, body: &str) -> Result<String, CliError> {
+    encode_message_text(&meta, body).map_err(|err| CliError::NodeControlFailed(err.to_string()))
+}
+
+async fn say(
+    client: &reqwest::Client,
+    text: &str,
+    room: &str,
+    reply_to: Option<&str>,
+) -> Result<String, CliError> {
+    let text = if let Some(reply_to) = reply_to {
+        if !valid_message_id(reply_to) {
+            return Err(CliError::NodeControlFailed("invalid message id".to_owned()));
+        }
+        encode_meta_text(
+            MessageMeta {
+                kind: MessageKind::Answer,
+                reply_to: Some(reply_to.to_owned()),
+                action: None,
+                agent: None,
+                note: None,
+            },
+            text,
+        )?
+    } else {
+        text.to_owned()
+    };
+    let message = send_message(client, &text, room).await?;
     Ok(format!("sent {}", message.id))
+}
+
+async fn answer(
+    client: &reqwest::Client,
+    message_id: &str,
+    text: &str,
+    room: &str,
+) -> Result<String, CliError> {
+    say(client, text, room, Some(message_id)).await
+}
+
+async fn receipt(
+    client: &reqwest::Client,
+    action: ReceiptAction,
+    message_id: &str,
+    agent: &str,
+    note: Option<&str>,
+    room: &str,
+) -> Result<String, CliError> {
+    if !valid_message_id(message_id) {
+        return Err(CliError::NodeControlFailed("invalid message id".to_owned()));
+    }
+    let body = match note {
+        Some(note) if !note.trim().is_empty() => {
+            format!(
+                "{agent} {} {}: {note}",
+                action.as_str(),
+                short_id(message_id)
+            )
+        }
+        _ => format!("{agent} {} {}", action.as_str(), short_id(message_id)),
+    };
+    let text = encode_meta_text(
+        MessageMeta {
+            kind: MessageKind::Receipt,
+            reply_to: Some(message_id.to_owned()),
+            action: Some(action),
+            agent: Some(agent.to_owned()),
+            note: note.map(str::to_owned),
+        },
+        &body,
+    )?;
+    let message = send_message(client, &text, room).await?;
+    Ok(format!(
+        "{} {} via {}",
+        action.as_str(),
+        message_id,
+        message.id
+    ))
 }
 
 async fn ask(
@@ -876,7 +1067,17 @@ async fn ask(
 ) -> Result<String, CliError> {
     let since = now_ms();
     let trusted = trusted_peers(client).await?;
-    let message = send_message(client, text, room).await?;
+    let question_text = encode_meta_text(
+        MessageMeta {
+            kind: MessageKind::Question,
+            reply_to: None,
+            action: None,
+            agent: None,
+            note: None,
+        },
+        text,
+    )?;
+    let message = send_message(client, &question_text, room).await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let initial_deliveries = fetch_deliveries(client, &message.id).await?.deliveries;
     let local_node_id = node_info(client).await?.node_id;
@@ -903,7 +1104,8 @@ async fn ask(
     lines.push(format!("Waiting {wait_secs}s for replies..."));
 
     tokio::time::sleep(Duration::from_secs(wait_secs)).await;
-    let final_deliveries = fetch_deliveries(client, &message.id).await?.deliveries;
+    let question_id = message.id.clone();
+    let final_deliveries = fetch_deliveries(client, &question_id).await?.deliveries;
     let replies = fetch_messages(client, room, since).await?.messages;
     let authors = author_trust(client).await?;
 
@@ -913,7 +1115,13 @@ async fn ask(
     lines.push("".to_owned());
     lines.push("Replies:".to_owned());
     let mut reply_count = 0;
-    for reply in replies.into_iter().filter(|message| message.text != text) {
+    for reply in replies.into_iter().filter(|reply| {
+        reply.id != question_id
+            && !matches!(
+                split_message_text(&reply.text).0.map(|meta| meta.kind),
+                Some(MessageKind::Receipt)
+            )
+    }) {
         lines.push(format_message(&reply, &authors));
         reply_count += 1;
     }
@@ -932,6 +1140,96 @@ async fn chat(client: &reqwest::Client, room: &str, after_ms: u64) -> Result<Str
     Ok(messages
         .into_iter()
         .map(|message| format_chat_line(&message, &authors))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+#[derive(Debug)]
+struct InboxQuestion {
+    message: ChatMessage,
+    body: String,
+    status: String,
+    claimed_by: Vec<String>,
+    read_by: Vec<String>,
+    answers: usize,
+    last_note: Option<String>,
+}
+
+async fn inbox(client: &reqwest::Client, room: &str, all: bool) -> Result<String, CliError> {
+    let messages = fetch_messages(client, room, 0).await?.messages;
+    let authors = author_trust(client).await?;
+    let mut questions = BTreeMap::<String, InboxQuestion>::new();
+
+    for message in &messages {
+        let (meta, body) = split_message_text(&message.text);
+        match meta.map(|meta| (meta.kind, meta)) {
+            Some((MessageKind::Question, _meta)) => {
+                questions.insert(
+                    message.id.clone(),
+                    InboxQuestion {
+                        message: message.clone(),
+                        body,
+                        status: "open".to_owned(),
+                        claimed_by: Vec::new(),
+                        read_by: Vec::new(),
+                        answers: 0,
+                        last_note: None,
+                    },
+                );
+            }
+            Some((MessageKind::Answer, meta)) => {
+                if let Some(reply_to) = meta.reply_to {
+                    if let Some(question) = questions.get_mut(&reply_to) {
+                        question.answers += 1;
+                        if question.status != "done" {
+                            question.status = "answered".to_owned();
+                        }
+                    }
+                }
+            }
+            Some((MessageKind::Receipt, meta)) => {
+                if let Some(reply_to) = meta.reply_to {
+                    if let Some(question) = questions.get_mut(&reply_to) {
+                        let agent = meta
+                            .agent
+                            .unwrap_or_else(|| short_id(&message.author_node_id));
+                        match meta.action {
+                            Some(ReceiptAction::Read) => push_unique(&mut question.read_by, agent),
+                            Some(ReceiptAction::Claim) => {
+                                push_unique(&mut question.claimed_by, agent);
+                                if question.status == "open" {
+                                    question.status = "claimed".to_owned();
+                                }
+                            }
+                            Some(ReceiptAction::Done) => question.status = "done".to_owned(),
+                            Some(ReceiptAction::Decline) => {
+                                if question.status == "open" || question.status == "claimed" {
+                                    question.status = "declined".to_owned();
+                                }
+                            }
+                            None => {}
+                        }
+                        if let Some(note) = meta.note {
+                            question.last_note = Some(note);
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    let mut items = questions.into_values().collect::<Vec<_>>();
+    items.sort_by_key(|item| item.message.created_at_ms);
+    if !all {
+        items.retain(|item| matches!(item.status.as_str(), "open" | "claimed" | "declined"));
+    }
+    if items.is_empty() {
+        return Ok("inbox empty".to_owned());
+    }
+    Ok(items
+        .into_iter()
+        .map(|item| format_inbox_item(&item, &authors))
         .collect::<Vec<_>>()
         .join("\n"))
 }
@@ -1122,6 +1420,41 @@ fn format_peer_line(peer: &PeerRecord) -> String {
     )
 }
 
+fn format_inbox_item(item: &InboxQuestion, authors: &BTreeMap<String, String>) -> String {
+    let label = authors
+        .get(&item.message.author_node_id)
+        .map(String::as_str)
+        .unwrap_or("unknown");
+    let mut line = format!(
+        "{}\tid={}\tfrom={}:{}\tat={}\t{}",
+        item.status,
+        short_id(&item.message.id),
+        label,
+        short_id(&item.message.author_node_id),
+        item.message.created_at_ms,
+        item.body.replace('\n', " ")
+    );
+    if !item.claimed_by.is_empty() {
+        line.push_str(&format!("\tclaimed_by={}", item.claimed_by.join(",")));
+    }
+    if !item.read_by.is_empty() {
+        line.push_str(&format!("\tread_by={}", item.read_by.join(",")));
+    }
+    if item.answers > 0 {
+        line.push_str(&format!("\tanswers={}", item.answers));
+    }
+    if let Some(note) = &item.last_note {
+        line.push_str(&format!("\tnote={}", note.replace('\n', " ")));
+    }
+    line
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
 fn format_delivery_line(delivery: &DeliveryRecord) -> String {
     let mut line = format!(
         "{}\tpeer={}\turl={}\tattempted_at_ms={}",
@@ -1247,11 +1580,39 @@ fn format_message(message: &ChatMessage, authors: &BTreeMap<String, String>) -> 
         .get(&message.author_node_id)
         .map(String::as_str)
         .unwrap_or("unknown");
+    let (meta, body) = split_message_text(&message.text);
+    let prefix = match meta {
+        Some(MessageMeta {
+            kind: MessageKind::Question,
+            ..
+        }) => "? ".to_owned(),
+        Some(MessageMeta {
+            kind: MessageKind::Answer,
+            reply_to: Some(reply_to),
+            ..
+        }) => format!("↳{} ", short_id(&reply_to)),
+        Some(MessageMeta {
+            kind: MessageKind::Receipt,
+            action,
+            reply_to,
+            agent,
+            ..
+        }) => format!(
+            "{} {}{} ",
+            action.map(ReceiptAction::as_str).unwrap_or("receipt"),
+            reply_to.as_deref().map(short_id).unwrap_or_default(),
+            agent
+                .map(|agent| format!(" by {agent}"))
+                .unwrap_or_default()
+        ),
+        Some(_) | None => String::new(),
+    };
     format!(
-        "[{}] {}: {}",
+        "[{}] {}: {}{}",
         label,
         short_id(&message.author_node_id),
-        message.text
+        prefix,
+        body
     )
 }
 
@@ -1276,6 +1637,10 @@ fn node_url() -> String {
 
 fn short_id(node_id: &str) -> String {
     node_id.chars().take(8).collect()
+}
+
+fn valid_message_id(message_id: &str) -> bool {
+    message_id.len() == 64 && message_id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn now_ms() -> u64 {
@@ -1427,6 +1792,64 @@ mod tests {
                 command: Command::Say {
                     text: "hello".to_owned(),
                     room: "ops".to_owned(),
+                    reply_to: None,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_answer_and_receipts() {
+        let message_id = "a".repeat(64);
+        assert_eq!(
+            Cli::parse_from(["hive", "answer", &message_id, "done"]),
+            Cli {
+                command: Command::Answer {
+                    message_id: message_id.clone(),
+                    text: "done".to_owned(),
+                    room: "default".to_owned(),
+                }
+            }
+        );
+        assert_eq!(
+            Cli::parse_from(["hive", "claim", &message_id, "--agent", "Pi"]),
+            Cli {
+                command: Command::Claim {
+                    message_id: message_id.clone(),
+                    agent: "Pi".to_owned(),
+                    room: "default".to_owned(),
+                }
+            }
+        );
+        assert_eq!(
+            Cli::parse_from([
+                "hive",
+                "decline",
+                &message_id,
+                "--agent",
+                "Pi",
+                "--reason",
+                "busy"
+            ]),
+            Cli {
+                command: Command::Decline {
+                    message_id,
+                    agent: "Pi".to_owned(),
+                    reason: Some("busy".to_owned()),
+                    room: "default".to_owned(),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_inbox() {
+        assert_eq!(
+            Cli::parse_from(["hive", "inbox", "--room", "ops", "--all"]),
+            Cli {
+                command: Command::Inbox {
+                    room: "ops".to_owned(),
+                    all: true,
                 }
             }
         );

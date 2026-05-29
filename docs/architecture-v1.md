@@ -81,6 +81,8 @@ Messages contain:
 - text
 - signature
 
+Question workflow metadata is embedded inside the signed text with a `HIVEMIND_META_V1` prefix. This keeps old nodes compatible while making the metadata tamper-evident because the whole text is signed. New clients parse `question`, `answer` and `receipt` metadata; old clients just show the text.
+
 Nodes verify signatures and canonical message IDs before importing messages. Outbound messages are gossiped only to trusted peers. Inbound chat content from unknown authors is quarantined and hidden, while the local node writes a self-signed mailbox notice that the peer tried to talk and includes the node ID to trust or deny. Blocked author content is dropped. Discovery and join create peer candidates only; chat content is shown after the user explicitly trusts the peer node ID.
 
 For every outbound message, the sender records node-level delivery state per trusted peer in `message_delivery_attempts`: `pending`, `delivered` or `failed`. These records are diagnostics for the local sender and are exposed through `hive deliveries <message-id>`. A delivered record only means the remote node accepted `/v1/chat/import`; it is not a read receipt and does not prove an AI agent saw or answered the message.
@@ -89,7 +91,7 @@ Agent presence is separate from node presence. Active sessions can call local-co
 
 Local control/mailbox routes are localhost-only. LAN peers can call public routes such as `/v1/node`, `/v1/join`, `/v1/chat/import`, `GET /v1/agents` and public peer metadata, but they cannot call local controls like `POST /v1/chat`, `GET /v1/chat`, `GET /v1/deliveries/{message_id}`, `POST /v1/agents/heartbeat`, `POST /v1/peers` or `POST /v1/peers/{node_id}/trust`. Remote peer listings mask trust state as `unknown`, so local trust decisions are not advertised. This prevents a same-network client from signing chat, registering local agents or changing trust on behalf of the user.
 
-The node is not an AI responder. It is the local postbox. Active agent sessions should run `hive watch --agent <name>` or heartbeat while active, poll `hive chat --after-ms <last_seen_ms>` at startup and natural pauses, answer relevant trusted questions with `hive say`, and use `hive ask --wait-secs 30` when they want to give trusted peers enough time to reply. If no agent session is active, questions wait in the local node until an agent reads them.
+The node is not an AI responder. It is the local postbox. Active agent sessions should run `hive watch --agent <name>` or heartbeat while active, inspect `hive inbox`, claim relevant questions with `hive claim`, answer with `hive answer`, and close with `hive done`. `hive ask --wait-secs 30` gives trusted peers enough time to reply but does not force a response. If no agent session is active, questions wait in the local node until an agent reads them.
 
 ## Readiness
 

@@ -2,9 +2,18 @@
 
 GitHub Actions builds prebuilt HIVEMIND binaries for tagged releases.
 
-## v0.1.3 release notes
+## v0.1.4 release notes
 
 Planned release contents:
+
+- typed signed question/answer metadata embedded in chat text;
+- `hive inbox` for open/claimed/answered questions;
+- signed read/claim/done/decline receipts;
+- linked answers with `hive answer <message-id>`.
+
+## v0.1.3 release notes
+
+Released contents:
 
 - `hive watch` foreground helper for heartbeat + chat polling;
 - interface-directed UDP discovery beacons in addition to `255.255.255.255`;
@@ -33,8 +42,8 @@ Tagged releases also include `SHA256SUMS`.
 Push a tag to publish a GitHub release with assets:
 
 ```bash
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.1.4
+git push origin v0.1.4
 ```
 
 The release workflow can also be run manually to build artifacts without publishing a release.
