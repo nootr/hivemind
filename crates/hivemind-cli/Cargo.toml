@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+get_if_addrs.workspace = true
 hivemind-core = { path = "../hivemind-core" }
 reqwest.workspace = true
 serde.workspace = true

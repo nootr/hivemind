@@ -55,9 +55,11 @@ Use automatic LAN discovery first:
 hive peers
 ```
 
-If discovery does not find the expected peer and the user gives a peer URL, use manual join as a fallback:
+If discovery does not find the expected peer, run diagnostics. If the user gives a LAN CIDR or peer URL, use scan or manual join as a fallback:
 
 ```bash
+hive doctor
+hive scan <cidr>
 hive join <node-url>
 hive peers
 ```

@@ -30,9 +30,11 @@ Keep both nodes running on the same LAN for a few seconds, then check discovered
 hive peers
 ```
 
-If UDP discovery is blocked, use manual join as a fallback, then check peers again:
+If UDP discovery is blocked, run diagnostics and use scan or manual join as a fallback, then check peers again:
 
 ```bash
+hive doctor
+hive scan <your-lan-cidr>
 hive join <other-machine-advertised-node-url>
 hive peers
 ```

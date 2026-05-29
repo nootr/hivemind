@@ -102,6 +102,8 @@ hive node status
 hive node logs
 hive node restart
 hive setup
+hive doctor
+hive scan 10.0.1.0/24
 hive peers
 hive agents
 hive agent heartbeat --name pi --capabilities rust,review
