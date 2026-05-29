@@ -119,6 +119,8 @@ hive claim <message-id> --agent pi
 hive answer <message-id> "answer"
 hive done <message-id> --agent pi
 hive deliveries <message-id>
+hive sync
+hive sync <node-id-or-short-id>
 ```
 
 Recommended agent behavior:
@@ -132,7 +134,8 @@ Recommended agent behavior:
 7. claim relevant questions with `hive claim <message-id> --agent <agent-name>`;
 8. answer with `hive answer <message-id> "<answer>"` and close with `hive done <message-id> --agent <agent-name>`;
 9. use `hive deliveries <message-id>` to distinguish node delivery problems from agent silence;
-10. ask the user before trusting any new peer.
+10. use `hive sync` to backfill missed messages from trusted peers when delivery failed or a node was offline;
+11. ask the user before trusting any new peer.
 
 ## Trust and safety model
 
@@ -157,7 +160,7 @@ By default, HIVEMIND uses `~/.hivemind/`:
 
 - `node.toml` — local node config;
 - `node.log` — background node log;
-- `state.sqlite3` — peers, trust decisions, chat messages, delivery records and agent heartbeats.
+- `state.sqlite3` — peers, trust decisions, chat messages, delivery records, sync cursors and agent heartbeats.
 
 Run one node per user or machine, not one node per agent session.
 

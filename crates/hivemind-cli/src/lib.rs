@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     env, fs,
+    io::{self, IsTerminal},
     net::Ipv4Addr,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
@@ -48,6 +49,16 @@ pub enum Command {
     },
     Deliveries {
         message_id: String,
+    },
+    Sync {
+        #[arg(default_value = "all")]
+        target: String,
+        #[arg(long, default_value = "default")]
+        room: String,
+        #[arg(long)]
+        since_ms: Option<u64>,
+        #[arg(long, default_value_t = 500)]
+        limit: u16,
     },
     Update {
         #[arg(long)]
@@ -271,6 +282,30 @@ struct DeliveriesResponse {
     deliveries: Vec<DeliveryRecord>,
 }
 
+#[derive(Debug, Serialize)]
+struct SyncControlRequest<'a> {
+    target: &'a str,
+    room: &'a str,
+    since_ms: Option<u64>,
+    limit: u16,
+}
+
+#[derive(Debug, Deserialize)]
+struct SyncResponse {
+    results: Vec<SyncPeerResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SyncPeerResult {
+    peer_node_id: String,
+    peer_url: String,
+    after_ms: u64,
+    fetched: usize,
+    imported: usize,
+    status: String,
+    error: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct AgentsResponse {
     agents: Vec<AgentRecord>,
@@ -319,6 +354,12 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
             } => agent_heartbeat(client, &name, agent_id.as_deref(), &capabilities, ttl_secs).await,
         },
         Command::Deliveries { message_id } => deliveries(client, &message_id).await,
+        Command::Sync {
+            target,
+            room,
+            since_ms,
+            limit,
+        } => sync(client, &target, &room, since_ms, limit).await,
         Command::Update {
             repo_url,
             branch,
@@ -901,8 +942,11 @@ async fn join(client: &reqwest::Client, remote_node_url: &str) -> Result<String,
             joined += 1;
         }
     }
+    let sync_summary = sync(client, "all", "default", None, 500)
+        .await
+        .unwrap_or_else(|err| format!("initial sync failed: {err}"));
     Ok(format!(
-        "joined peer network via {remote_url}; imported {joined} unknown peer candidates"
+        "joined peer network via {remote_url}; imported {joined} unknown peer candidates\nInitial sync:\n{sync_summary}"
     ))
 }
 
@@ -1112,6 +1156,42 @@ async fn deliveries(client: &reqwest::Client, message_id: &str) -> Result<String
         .join("\n"))
 }
 
+async fn sync(
+    client: &reqwest::Client,
+    target: &str,
+    room: &str,
+    since_ms: Option<u64>,
+    limit: u16,
+) -> Result<String, CliError> {
+    if limit == 0 {
+        return Err(CliError::NodeControlFailed(
+            "sync limit must be greater than zero".to_owned(),
+        ));
+    }
+    let response = client
+        .post(format!("{}/v1/sync", node_url()))
+        .json(&SyncControlRequest {
+            target,
+            room,
+            since_ms,
+            limit,
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<SyncResponse>()
+        .await?;
+    if response.results.is_empty() {
+        return Ok("no trusted peers to sync".to_owned());
+    }
+    Ok(response
+        .results
+        .into_iter()
+        .map(|result| format_sync_result(&result))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 async fn agent_heartbeat(
     client: &reqwest::Client,
     name: &str,
@@ -1165,19 +1245,34 @@ async fn agents(client: &reqwest::Client) -> Result<String, CliError> {
 }
 
 async fn trust_peer(client: &reqwest::Client, node_id: &str) -> Result<String, CliError> {
-    update_peer_state(client, node_id, "trust", "trusted").await
+    let peer = update_peer_state(client, node_id, "trust").await?;
+    let sync_summary = sync(client, &peer.node_id, "default", None, 500)
+        .await
+        .unwrap_or_else(|err| format!("initial sync failed: {err}"));
+    Ok(format!(
+        "trusted {} {} ({})\nInitial sync:\n{}",
+        peer.name.as_deref().unwrap_or("unknown"),
+        peer_url_label(&peer),
+        peer.node_id,
+        sync_summary
+    ))
 }
 
 async fn deny_peer(client: &reqwest::Client, node_id: &str) -> Result<String, CliError> {
-    update_peer_state(client, node_id, "deny", "blocked").await
+    let peer = update_peer_state(client, node_id, "deny").await?;
+    Ok(format!(
+        "blocked {} {} ({})",
+        peer.name.as_deref().unwrap_or("unknown"),
+        peer_url_label(&peer),
+        peer.node_id
+    ))
 }
 
 async fn update_peer_state(
     client: &reqwest::Client,
     node_id: &str,
     route: &str,
-    label: &str,
-) -> Result<String, CliError> {
+) -> Result<PeerRecord, CliError> {
     if !valid_node_id(node_id) {
         return Err(CliError::InvalidNodeId);
     }
@@ -1188,13 +1283,7 @@ async fn update_peer_state(
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Err(CliError::PeerNotFound);
     }
-    let peer = response.error_for_status()?.json::<PeerRecord>().await?;
-    Ok(format!(
-        "{label} {} {} ({})",
-        peer.name.as_deref().unwrap_or("unknown"),
-        peer_url_label(&peer),
-        peer.node_id
-    ))
+    Ok(response.error_for_status()?.json::<PeerRecord>().await?)
 }
 
 async fn send_message(
@@ -1841,6 +1930,23 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
+fn format_sync_result(result: &SyncPeerResult) -> String {
+    let mut line = format!(
+        "{} {} fetched={} imported={} after_ms={} url={}",
+        status_mark(&result.status),
+        result.status,
+        result.fetched,
+        result.imported,
+        result.after_ms,
+        result.peer_url
+    );
+    line.push_str(&format!("\tpeer={}", short_id(&result.peer_node_id)));
+    if let Some(error) = &result.error {
+        line.push_str(&format!("\terror={error}"));
+    }
+    line
+}
+
 fn format_delivery_line(delivery: &DeliveryRecord) -> String {
     let mut line = format!(
         "{}\tpeer={}\turl={}\tattempted_at_ms={}",
@@ -1896,7 +2002,7 @@ fn format_delivery_summary(trusted: &[PeerRecord], deliveries: &[DeliveryRecord]
 
 fn status_mark(status: &str) -> &'static str {
     match status {
-        "delivered" => "✓",
+        "ok" | "delivered" => "✓",
         "failed" => "✗",
         "pending" => "…",
         _ => "?",
@@ -1954,19 +2060,71 @@ fn peer_url_label(peer: &PeerRecord) -> &str {
 }
 
 fn format_chat_line(message: &ChatMessage, authors: &BTreeMap<String, String>) -> String {
-    format!(
-        "{} {}",
-        message.created_at_ms,
-        format_message(message, authors)
-    )
+    format_chat_line_with_style(message, authors, chat_output_style())
+}
+
+fn format_chat_line_with_style(
+    message: &ChatMessage,
+    authors: &BTreeMap<String, String>,
+    style: ChatStyle,
+) -> String {
+    match style {
+        ChatStyle::Plain => format!(
+            "{} {}",
+            message.created_at_ms,
+            format_message_with_style(message, authors, style)
+        ),
+        ChatStyle::Ansi => format!(
+            "{} {}",
+            ansi("2", &message.created_at_ms.to_string()),
+            format_message_with_style(message, authors, style)
+        ),
+    }
 }
 
 fn format_message(message: &ChatMessage, authors: &BTreeMap<String, String>) -> String {
+    format_message_with_style(message, authors, ChatStyle::Plain)
+}
+
+fn format_message_with_style(
+    message: &ChatMessage,
+    authors: &BTreeMap<String, String>,
+    style: ChatStyle,
+) -> String {
+    let parts = message_display_parts(message, authors);
+    match style {
+        ChatStyle::Plain => format!(
+            "[{}] {}: {}{}",
+            parts.label, parts.author_short, parts.prefix, parts.body
+        ),
+        ChatStyle::Ansi => format!(
+            "[{}] {}: {}{}",
+            color_author_label(&parts.label),
+            ansi("36", &parts.author_short),
+            color_prefix(&parts.prefix, parts.meta_kind),
+            parts.body
+        ),
+    }
+}
+
+struct MessageDisplayParts {
+    label: String,
+    author_short: String,
+    prefix: String,
+    meta_kind: Option<MessageKind>,
+    body: String,
+}
+
+fn message_display_parts(
+    message: &ChatMessage,
+    authors: &BTreeMap<String, String>,
+) -> MessageDisplayParts {
     let label = authors
         .get(&message.author_node_id)
-        .map(String::as_str)
-        .unwrap_or("unknown");
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_owned());
     let (meta, body) = split_message_text(&message.text);
+    let meta_kind = meta.as_ref().map(|meta| meta.kind);
     let prefix = match meta {
         Some(MessageMeta {
             kind: MessageKind::Question,
@@ -1993,13 +2151,61 @@ fn format_message(message: &ChatMessage, authors: &BTreeMap<String, String>) -> 
         ),
         Some(_) | None => String::new(),
     };
-    format!(
-        "[{}] {}: {}{}",
+    MessageDisplayParts {
         label,
-        short_id(&message.author_node_id),
+        author_short: short_id(&message.author_node_id),
         prefix,
-        body
-    )
+        meta_kind,
+        body: body.to_owned(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChatStyle {
+    Plain,
+    Ansi,
+}
+
+fn chat_output_style() -> ChatStyle {
+    match env::var("HIVEMIND_COLOR").as_deref() {
+        Ok("always") | Ok("1") | Ok("true") => return ChatStyle::Ansi,
+        Ok("never") | Ok("0") | Ok("false") => return ChatStyle::Plain,
+        _ => {}
+    }
+    if env::var_os("NO_COLOR").is_some() {
+        return ChatStyle::Plain;
+    }
+    if io::stdout().is_terminal() {
+        ChatStyle::Ansi
+    } else {
+        ChatStyle::Plain
+    }
+}
+
+fn color_author_label(label: &str) -> String {
+    match label {
+        "self" => ansi("1;32", label),
+        "trusted" => ansi("32", label),
+        "unknown" => ansi("33", label),
+        "blocked" => ansi("31", label),
+        _ => ansi("36", label),
+    }
+}
+
+fn color_prefix(prefix: &str, meta_kind: Option<MessageKind>) -> String {
+    if prefix.is_empty() {
+        return String::new();
+    }
+    match meta_kind {
+        Some(MessageKind::Question) => ansi("1;35", prefix),
+        Some(MessageKind::Answer) => ansi("34", prefix),
+        Some(MessageKind::Receipt) => ansi("2", prefix),
+        _ => prefix.to_owned(),
+    }
+}
+
+fn ansi(code: &str, text: &str) -> String {
+    format!("\x1b[{code}m{text}\x1b[0m")
 }
 
 fn home_dir() -> Result<PathBuf, CliError> {
@@ -2127,6 +2333,31 @@ mod tests {
             Cli {
                 command: Command::Deliveries {
                     message_id: "a".repeat(64),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_sync() {
+        assert_eq!(
+            Cli::parse_from([
+                "hive",
+                "sync",
+                "8edb344b",
+                "--room",
+                "ops",
+                "--since-ms",
+                "123",
+                "--limit",
+                "50",
+            ]),
+            Cli {
+                command: Command::Sync {
+                    target: "8edb344b".to_owned(),
+                    room: "ops".to_owned(),
+                    since_ms: Some(123),
+                    limit: 50,
                 }
             }
         );
@@ -2524,6 +2755,28 @@ mod tests {
         assert_eq!(
             format_message(&message, &authors),
             "[trusted] aaaaaaaa: hello"
+        );
+        assert_eq!(
+            format_chat_line_with_style(&message, &authors, ChatStyle::Plain),
+            "1 [trusted] aaaaaaaa: hello"
+        );
+    }
+
+    #[test]
+    fn colorizes_chat_line_without_coloring_body() {
+        let mut authors = BTreeMap::new();
+        authors.insert("a".repeat(64), "trusted".to_owned());
+        let message = ChatMessage {
+            id: "id".to_owned(),
+            room: "default".to_owned(),
+            author_node_id: "a".repeat(64),
+            created_at_ms: 1,
+            text: "hello".to_owned(),
+            signature: "sig".to_owned(),
+        };
+        assert_eq!(
+            format_chat_line_with_style(&message, &authors, ChatStyle::Ansi),
+            "\u{1b}[2m1\u{1b}[0m [\u{1b}[32mtrusted\u{1b}[0m] \u{1b}[36maaaaaaaa\u{1b}[0m: hello"
         );
     }
 

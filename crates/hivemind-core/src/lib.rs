@@ -96,6 +96,38 @@ impl NodeKey {
             signature: hex::encode(signature.to_bytes()),
         }
     }
+
+    pub fn sign_sync_request(
+        &self,
+        target_node_id: &str,
+        room: &str,
+        after_ms: u64,
+        limit: u16,
+        nonce: &str,
+    ) -> SignedSyncRequest {
+        let requester_node_id = self.node_id();
+        let unsigned = UnsignedSyncRequest {
+            requester_node_id: requester_node_id.clone(),
+            target_node_id: target_node_id.to_owned(),
+            room: room.to_owned(),
+            after_ms,
+            limit,
+            nonce: nonce.to_owned(),
+        };
+        let signing_bytes = unsigned
+            .signing_bytes()
+            .expect("sync request signing bytes encode");
+        let signature = self.signing_key.sign(&signing_bytes);
+        SignedSyncRequest {
+            requester_node_id,
+            target_node_id: unsigned.target_node_id,
+            room: unsigned.room,
+            after_ms,
+            limit,
+            nonce: unsigned.nonce,
+            signature: hex::encode(signature.to_bytes()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -284,6 +316,17 @@ pub struct NodeProof {
     pub signature: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct SignedSyncRequest {
+    pub requester_node_id: String,
+    pub target_node_id: String,
+    pub room: String,
+    pub after_ms: u64,
+    pub limit: u16,
+    pub nonce: String,
+    pub signature: String,
+}
+
 #[derive(Serialize)]
 struct UnsignedChatMessage {
     room: String,
@@ -312,6 +355,22 @@ impl UnsignedNodeProof {
     }
 }
 
+#[derive(Serialize)]
+struct UnsignedSyncRequest {
+    requester_node_id: String,
+    target_node_id: String,
+    room: String,
+    after_ms: u64,
+    limit: u16,
+    nonce: String,
+}
+
+impl UnsignedSyncRequest {
+    fn signing_bytes(&self) -> Result<Vec<u8>, CoreError> {
+        Ok(serde_json::to_vec(self)?)
+    }
+}
+
 impl NodeProof {
     pub fn verify(&self) -> Result<(), CoreError> {
         let key_bytes = hex::decode(&self.node_id)?;
@@ -327,6 +386,31 @@ impl NodeProof {
             node_url: self.node_url.clone(),
             node_id: self.node_id.clone(),
             name: self.name.clone(),
+            nonce: self.nonce.clone(),
+        };
+        verifying_key
+            .verify(&unsigned.signing_bytes()?, &signature)
+            .map_err(|_| CoreError::InvalidSignature)
+    }
+}
+
+impl SignedSyncRequest {
+    pub fn verify(&self) -> Result<(), CoreError> {
+        let key_bytes = hex::decode(&self.requester_node_id)?;
+        let key_bytes: [u8; 32] = key_bytes.try_into().map_err(|_| CoreError::InvalidKey)?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&key_bytes).map_err(|_| CoreError::InvalidKey)?;
+        let sig_bytes = hex::decode(&self.signature)?;
+        let sig_bytes: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| CoreError::InvalidSignature)?;
+        let signature = Signature::from_bytes(&sig_bytes);
+        let unsigned = UnsignedSyncRequest {
+            requester_node_id: self.requester_node_id.clone(),
+            target_node_id: self.target_node_id.clone(),
+            room: self.room.clone(),
+            after_ms: self.after_ms,
+            limit: self.limit,
             nonce: self.nonce.clone(),
         };
         verifying_key
@@ -469,6 +553,25 @@ mod tests {
         let mut proof = key.sign_node_proof("http://127.0.0.1:7747", None, "abc");
         proof.node_url = "http://127.0.0.1:9999".to_owned();
         assert!(matches!(proof.verify(), Err(CoreError::InvalidSignature)));
+    }
+
+    #[test]
+    fn sync_request_verifies() {
+        let key = NodeKey::generate().unwrap();
+        let target = NodeKey::generate().unwrap();
+        let request = key.sign_sync_request(&target.node_id(), "default", 123, 500, "nonce");
+        request.verify().unwrap();
+        assert_eq!(request.requester_node_id, key.node_id());
+        assert_eq!(request.target_node_id, target.node_id());
+    }
+
+    #[test]
+    fn changed_sync_request_fails_verification() {
+        let key = NodeKey::generate().unwrap();
+        let target = NodeKey::generate().unwrap();
+        let mut request = key.sign_sync_request(&target.node_id(), "default", 123, 500, "nonce");
+        request.target_node_id = NodeKey::generate().unwrap().node_id();
+        assert!(matches!(request.verify(), Err(CoreError::InvalidSignature)));
     }
 
     #[test]
