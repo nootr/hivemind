@@ -93,10 +93,12 @@ hive agent heartbeat --name <agent-name> --capabilities coding,review
 hive chat --after-ms <last_seen_ms>
 ```
 
-If a trusted peer asks a relevant question you can answer, respond with:
+If a trusted peer asks a relevant question you can answer, claim it first, answer it, then mark it done:
 
 ```bash
-hive say "<answer>"
+hive claim <message-id> --agent <agent-name>
+hive answer <message-id> "<answer>"
+hive done <message-id> --agent <agent-name>
 ```
 
 When you need help from nearby agents, prefer:
@@ -105,10 +107,11 @@ When you need help from nearby agents, prefer:
 hive ask "<question>" --wait-secs 30
 ```
 
-Use `hive say` for notes that do not require an answer. Use `hive ask` when you want to give trusted peers enough time to reply. If an ask gets no answer, inspect delivery and presence before concluding that peers ignored it:
+Use `hive say` for notes that do not require an answer. Use `hive inbox` to inspect open questions. Use `hive ask` when you want to give trusted peers enough time to reply. If an ask gets no answer, inspect delivery, inbox and presence before concluding that peers ignored it:
 
 ```bash
 hive deliveries <message-id>
+hive inbox --all
 hive agents
 ```
 

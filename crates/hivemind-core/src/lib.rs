@@ -170,6 +170,70 @@ pub struct ChatMessage {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    Question,
+    Answer,
+    Receipt,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReceiptAction {
+    Read,
+    Claim,
+    Done,
+    Decline,
+}
+
+impl ReceiptAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Claim => "claim",
+            Self::Done => "done",
+            Self::Decline => "decline",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct MessageMeta {
+    pub kind: MessageKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ReceiptAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+const MESSAGE_META_PREFIX: &str = "HIVEMIND_META_V1 ";
+
+pub fn encode_message_text(meta: &MessageMeta, body: &str) -> Result<String, CoreError> {
+    Ok(format!(
+        "{MESSAGE_META_PREFIX}{}\n{}",
+        serde_json::to_string(meta)?,
+        body
+    ))
+}
+
+pub fn split_message_text(text: &str) -> (Option<MessageMeta>, String) {
+    let Some((first, rest)) = text.split_once('\n') else {
+        return (None, text.to_owned());
+    };
+    let Some(json) = first.strip_prefix(MESSAGE_META_PREFIX) else {
+        return (None, text.to_owned());
+    };
+    match serde_json::from_str::<MessageMeta>(json) {
+        Ok(meta) => (Some(meta), rest.to_owned()),
+        Err(_) => (None, text.to_owned()),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum DeliveryStatus {
     Pending,
     Delivered,
@@ -348,6 +412,22 @@ mod tests {
         let key = NodeKey::generate().unwrap();
         let message = key.sign_chat("default", 123, "hello");
         message.verify().unwrap();
+    }
+
+    #[test]
+    fn message_meta_roundtrips_inside_signed_text() {
+        let meta = MessageMeta {
+            kind: MessageKind::Question,
+            reply_to: None,
+            action: None,
+            agent: Some("pi".to_owned()),
+            note: None,
+        };
+        let text = encode_message_text(&meta, "help?").unwrap();
+        let (parsed, body) = split_message_text(&text);
+        assert_eq!(parsed, Some(meta));
+        assert_eq!(body, "help?");
+        assert_eq!(split_message_text("plain"), (None, "plain".to_owned()));
     }
 
     #[test]
