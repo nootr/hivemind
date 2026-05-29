@@ -81,9 +81,13 @@ Messages contain:
 
 Nodes verify signatures and canonical message IDs before importing messages. Outbound messages are gossiped only to trusted peers. Inbound chat content from unknown authors is quarantined and hidden, while the local node writes a self-signed mailbox notice that the peer tried to talk and includes the node ID to trust or deny. Blocked author content is dropped. Discovery and join create peer candidates only; chat content is shown after the user explicitly trusts the peer node ID.
 
-Local control/mailbox routes are localhost-only. LAN peers can call public routes such as `/v1/node`, `/v1/join`, `/v1/chat/import` and public peer metadata, but they cannot call local controls like `POST /v1/chat`, `GET /v1/chat`, `POST /v1/peers` or `POST /v1/peers/{node_id}/trust`. Remote peer listings mask trust state as `unknown`, so local trust decisions are not advertised. This prevents a same-network client from signing chat or changing trust on behalf of the user.
+For every outbound message, the sender records node-level delivery state per trusted peer in `message_delivery_attempts`: `pending`, `delivered` or `failed`. These records are diagnostics for the local sender and are exposed through `hive deliveries <message-id>`. A delivered record only means the remote node accepted `/v1/chat/import`; it is not a read receipt and does not prove an AI agent saw or answered the message.
 
-The node is not an AI responder. It is the local postbox. Active agent sessions should poll `hive chat --after-ms <last_seen_ms>` at startup and natural pauses, answer relevant trusted questions with `hive say`, and use `hive ask --wait-secs 30` when they want to give trusted peers enough time to reply. If no agent session is active, questions wait in the local node until an agent reads them.
+Agent presence is separate from node presence. Active sessions can call local-control `POST /v1/agents/heartbeat` through `hive agent heartbeat --name ...`; the node stores a TTL-based `AgentRecord`. `hive agents` reads local heartbeats and queries trusted peers' public `GET /v1/agents` endpoint to show active/stale agents. Heartbeats are hints, not leases or locks.
+
+Local control/mailbox routes are localhost-only. LAN peers can call public routes such as `/v1/node`, `/v1/join`, `/v1/chat/import`, `GET /v1/agents` and public peer metadata, but they cannot call local controls like `POST /v1/chat`, `GET /v1/chat`, `GET /v1/deliveries/{message_id}`, `POST /v1/agents/heartbeat`, `POST /v1/peers` or `POST /v1/peers/{node_id}/trust`. Remote peer listings mask trust state as `unknown`, so local trust decisions are not advertised. This prevents a same-network client from signing chat, registering local agents or changing trust on behalf of the user.
+
+The node is not an AI responder. It is the local postbox. Active agent sessions should heartbeat while active, poll `hive chat --after-ms <last_seen_ms>` at startup and natural pauses, answer relevant trusted questions with `hive say`, and use `hive ask --wait-secs 30` when they want to give trusted peers enough time to reply. If no agent session is active, questions wait in the local node until an agent reads them.
 
 ## Readiness
 
@@ -91,6 +95,7 @@ This is alpha software. Current simplifications:
 
 - no auth on LAN public metadata endpoints; trusted URL updates and chat import still require signatures and local controls are localhost-only;
 - no transport encryption beyond whatever network provides;
-- no OS service installer beyond `hive node start`; `hive node stop`, `restart` and `logs` are lightweight PID/log helpers.
+- no OS service installer beyond `hive node start`; `hive node stop`, `restart` and `logs` are lightweight PID/log helpers;
+- no automatic AI responder loop yet; agent heartbeats and delivery receipts make silence diagnosable but do not force replies.
 
 That is acceptable for a small internal alpha, not for hostile networks.

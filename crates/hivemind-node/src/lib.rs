@@ -12,8 +12,8 @@ use axum::{
     Json, Router,
 };
 use hivemind_core::{
-    inbound_decision, valid_node_id, ChatMessage, InboundDecision, NodeKey, NodeProof, PeerInfo,
-    PeerRecord, PeerTrustState,
+    inbound_decision, valid_node_id, AgentRecord, ChatMessage, DeliveryRecord, DeliveryStatus,
+    InboundDecision, NodeKey, NodeProof, PeerInfo, PeerRecord, PeerTrustState,
 };
 use net::{inferred_node_url, local_node_url, normalized_node_url, valid_node_url};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -38,6 +38,12 @@ const PEER_FETCH_TIMEOUT_SECS: u64 = 2;
 const MAX_CHAT_TEXT_BYTES: usize = 64 * 1024;
 const MAX_ROOM_BYTES: usize = 64;
 const MAX_NONCE_BYTES: usize = 128;
+const MAX_AGENT_ID_BYTES: usize = 64;
+const MAX_AGENT_NAME_BYTES: usize = 80;
+const MAX_CAPABILITY_BYTES: usize = 64;
+const MAX_CAPABILITIES: usize = 16;
+const MAX_AGENT_TTL_SECS: u64 = 60 * 60;
+const MAX_DELIVERY_ERROR_BYTES: usize = 512;
 const MAX_PEERS: i64 = 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -111,7 +117,7 @@ impl Store {
 
 fn migrate_store(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version > 2 {
+    if version > 3 {
         return Err(rusqlite::Error::InvalidQuery);
     }
     conn.execute_batch(
@@ -147,6 +153,29 @@ fn migrate_store(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS unknown_notices (
             node_id TEXT PRIMARY KEY NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS message_delivery_attempts (
+            message_id TEXT NOT NULL,
+            peer_node_id TEXT NOT NULL,
+            peer_url TEXT NOT NULL,
+            attempted_at_ms INTEGER NOT NULL,
+            delivered_at_ms INTEGER,
+            status TEXT NOT NULL,
+            error TEXT,
+            PRIMARY KEY (message_id, peer_node_id)
+        );
+        CREATE INDEX IF NOT EXISTS delivery_message_idx
+            ON message_delivery_attempts(message_id, attempted_at_ms);
+        CREATE TABLE IF NOT EXISTS agents (
+            node_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            capabilities_json TEXT NOT NULL,
+            last_seen_ms INTEGER NOT NULL,
+            expires_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (node_id, agent_id)
+        );
+        CREATE INDEX IF NOT EXISTS agents_expires_idx
+            ON agents(expires_at_ms);
         "#,
     )?;
     if column_exists(conn, "peers", "trusted")? {
@@ -156,7 +185,7 @@ fn migrate_store(conn: &Connection) -> rusqlite::Result<()> {
             "ALTER TABLE peers ADD COLUMN trust_state TEXT NOT NULL DEFAULT 'unknown';",
         )?;
     }
-    conn.execute_batch("PRAGMA user_version = 2;")
+    conn.execute_batch("PRAGMA user_version = 3;")
 }
 
 fn rebuild_peers_without_legacy_trusted(conn: &Connection) -> rusqlite::Result<()> {
@@ -234,6 +263,17 @@ pub struct NodeProofQuery {
     pub nonce: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AgentHeartbeatRequest {
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct NodeInfoResponse {
     pub node_url: String,
@@ -250,6 +290,16 @@ pub struct PeersResponse {
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct MessagesResponse {
     pub messages: Vec<ChatMessage>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct DeliveriesResponse {
+    pub deliveries: Vec<DeliveryRecord>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct AgentsResponse {
+    pub agents: Vec<AgentRecord>,
 }
 
 fn default_room() -> String {
@@ -291,6 +341,9 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/peers/{node_id}/deny", post(deny_peer))
         .route("/v1/chat", get(get_messages).post(say))
         .route("/v1/chat/import", post(import_message))
+        .route("/v1/deliveries/{message_id}", get(get_deliveries))
+        .route("/v1/agents", get(get_agents))
+        .route("/v1/agents/heartbeat", post(agent_heartbeat))
         .with_state(state)
 }
 
@@ -436,6 +489,55 @@ async fn get_messages(
     let after_ms = query.after_ms.unwrap_or(0);
     let messages = list_messages(&state, &query.room, after_ms)?;
     Ok(Json(MessagesResponse { messages }))
+}
+
+async fn get_deliveries(
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    Path(message_id): Path<String>,
+) -> Result<Json<DeliveriesResponse>, ApiError> {
+    require_local_client(client_addr)?;
+    if !valid_message_id(&message_id) {
+        return Err(ApiError::InvalidRequest);
+    }
+    Ok(Json(DeliveriesResponse {
+        deliveries: list_delivery_records(&state, &message_id)?,
+    }))
+}
+
+async fn get_agents(State(state): State<AppState>) -> Result<Json<AgentsResponse>, ApiError> {
+    Ok(Json(AgentsResponse {
+        agents: list_agents(&state)?,
+    }))
+}
+
+async fn agent_heartbeat(
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    Json(request): Json<AgentHeartbeatRequest>,
+) -> Result<Json<AgentRecord>, ApiError> {
+    require_local_client(client_addr)?;
+    let ttl_secs = request.ttl_secs.unwrap_or(120);
+    let agent_id = request.agent_id.unwrap_or_else(|| request.name.clone());
+    if !valid_agent_id(&agent_id)
+        || !valid_agent_name(&request.name)
+        || !valid_capabilities(&request.capabilities)
+        || ttl_secs == 0
+        || ttl_secs > MAX_AGENT_TTL_SECS
+    {
+        return Err(ApiError::InvalidRequest);
+    }
+    let now = now_ms();
+    let record = AgentRecord {
+        node_id: state.key.node_id(),
+        agent_id,
+        name: request.name,
+        capabilities: request.capabilities,
+        last_seen_ms: now,
+        expires_at_ms: now.saturating_add(ttl_secs.saturating_mul(1000)),
+    };
+    store_agent(&state, record.clone())?;
+    Ok(Json(record))
 }
 
 fn require_local_client(client_addr: SocketAddr) -> Result<(), ApiError> {
@@ -673,6 +775,192 @@ fn store_message(state: &AppState, message: ChatMessage) -> Result<(), ApiError>
             i64::try_from(message.created_at_ms).unwrap_or(i64::MAX),
             message.text,
             message.signature
+        ],
+    )
+    .map_err(map_store_error)?;
+    Ok(())
+}
+
+fn row_to_delivery(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeliveryRecord> {
+    Ok(DeliveryRecord {
+        message_id: row.get(0)?,
+        peer_node_id: row.get(1)?,
+        peer_url: row.get(2)?,
+        attempted_at_ms: row.get::<_, i64>(3)? as u64,
+        delivered_at_ms: row.get::<_, Option<i64>>(4)?.map(|value| value as u64),
+        status: delivery_status_from_db(&row.get::<_, String>(5)?)?,
+        error: row.get(6)?,
+    })
+}
+
+fn delivery_status_from_db(input: &str) -> rusqlite::Result<DeliveryStatus> {
+    match input {
+        "pending" => Ok(DeliveryStatus::Pending),
+        "delivered" => Ok(DeliveryStatus::Delivered),
+        "failed" => Ok(DeliveryStatus::Failed),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn list_delivery_records(
+    state: &AppState,
+    message_id: &str,
+) -> Result<Vec<DeliveryRecord>, ApiError> {
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    let mut statement = conn
+        .prepare(
+            "SELECT message_id, peer_node_id, peer_url, attempted_at_ms, delivered_at_ms, status, error
+             FROM message_delivery_attempts
+             WHERE message_id = ?1
+             ORDER BY peer_url, peer_node_id",
+        )
+        .map_err(map_store_error)?;
+    let records = statement
+        .query_map(params![message_id], row_to_delivery)
+        .map_err(map_store_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_store_error)?;
+    Ok(records)
+}
+
+fn record_delivery_pending(
+    state: &AppState,
+    message_id: &str,
+    peer: &PeerRecord,
+) -> Result<u64, ApiError> {
+    let attempted_at_ms = now_ms();
+    upsert_delivery(
+        state,
+        message_id,
+        peer,
+        attempted_at_ms,
+        None,
+        DeliveryStatus::Pending,
+        None,
+    )?;
+    Ok(attempted_at_ms)
+}
+
+fn record_delivery_result(
+    state: &AppState,
+    message_id: &str,
+    peer: &PeerRecord,
+    attempted_at_ms: u64,
+    status: DeliveryStatus,
+    error: Option<&str>,
+) -> Result<(), ApiError> {
+    let delivered_at_ms = (status == DeliveryStatus::Delivered).then(now_ms);
+    upsert_delivery(
+        state,
+        message_id,
+        peer,
+        attempted_at_ms,
+        delivered_at_ms,
+        status,
+        error,
+    )
+}
+
+fn upsert_delivery(
+    state: &AppState,
+    message_id: &str,
+    peer: &PeerRecord,
+    attempted_at_ms: u64,
+    delivered_at_ms: Option<u64>,
+    status: DeliveryStatus,
+    error: Option<&str>,
+) -> Result<(), ApiError> {
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    let error = error.map(truncate_delivery_error);
+    conn.execute(
+        "INSERT INTO message_delivery_attempts
+             (message_id, peer_node_id, peer_url, attempted_at_ms, delivered_at_ms, status, error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(message_id, peer_node_id) DO UPDATE SET
+             peer_url = excluded.peer_url,
+             attempted_at_ms = excluded.attempted_at_ms,
+             delivered_at_ms = excluded.delivered_at_ms,
+             status = excluded.status,
+             error = excluded.error",
+        params![
+            message_id,
+            peer.node_id,
+            peer.node_url,
+            i64::try_from(attempted_at_ms).unwrap_or(i64::MAX),
+            delivered_at_ms.map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+            status.as_str(),
+            error,
+        ],
+    )
+    .map_err(map_store_error)?;
+    Ok(())
+}
+
+fn row_to_agent(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRecord> {
+    let capabilities_json: String = row.get(3)?;
+    let capabilities = serde_json::from_str(&capabilities_json).unwrap_or_default();
+    Ok(AgentRecord {
+        node_id: row.get(0)?,
+        agent_id: row.get(1)?,
+        name: row.get(2)?,
+        capabilities,
+        last_seen_ms: row.get::<_, i64>(4)? as u64,
+        expires_at_ms: row.get::<_, i64>(5)? as u64,
+    })
+}
+
+fn list_agents(state: &AppState) -> Result<Vec<AgentRecord>, ApiError> {
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    let mut statement = conn
+        .prepare(
+            "SELECT node_id, agent_id, name, capabilities_json, last_seen_ms, expires_at_ms
+             FROM agents
+             ORDER BY expires_at_ms DESC, name, agent_id",
+        )
+        .map_err(map_store_error)?;
+    let agents = statement
+        .query_map([], row_to_agent)
+        .map_err(map_store_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_store_error)?;
+    Ok(agents)
+}
+
+fn store_agent(state: &AppState, agent: AgentRecord) -> Result<(), ApiError> {
+    let conn = state
+        .store
+        .conn
+        .lock()
+        .map_err(|_| ApiError::Internal("sqlite lock".to_owned()))?;
+    let capabilities_json = serde_json::to_string(&agent.capabilities)
+        .map_err(|err| ApiError::Internal(format!("json: {err}")))?;
+    conn.execute(
+        "INSERT INTO agents (node_id, agent_id, name, capabilities_json, last_seen_ms, expires_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(node_id, agent_id) DO UPDATE SET
+             name = excluded.name,
+             capabilities_json = excluded.capabilities_json,
+             last_seen_ms = excluded.last_seen_ms,
+             expires_at_ms = excluded.expires_at_ms",
+        params![
+            agent.node_id,
+            agent.agent_id,
+            agent.name,
+            capabilities_json,
+            i64::try_from(agent.last_seen_ms).unwrap_or(i64::MAX),
+            i64::try_from(agent.expires_at_ms).unwrap_or(i64::MAX),
         ],
     )
     .map_err(map_store_error)?;
@@ -1022,15 +1310,40 @@ async fn fetch_peer_list(state: AppState, peer: PeerInfo) {
 }
 
 fn gossip_message(state: AppState, message: ChatMessage) {
-    let peers = trusted_peers(&state);
+    let attempts = trusted_peers(&state)
+        .into_iter()
+        .map(|peer| {
+            let attempted_at_ms =
+                record_delivery_pending(&state, &message.id, &peer).unwrap_or_else(|_| now_ms());
+            (peer, attempted_at_ms)
+        })
+        .collect::<Vec<_>>();
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        for peer in peers {
-            let _ = client
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(PEER_FETCH_TIMEOUT_SECS))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        for (peer, attempted_at_ms) in attempts {
+            let outcome = match client
                 .post(format!("{}/v1/chat/import", peer.node_url))
                 .json(&message)
                 .send()
-                .await;
+                .await
+            {
+                Ok(response) => match response.error_for_status() {
+                    Ok(_) => (DeliveryStatus::Delivered, None),
+                    Err(err) => (DeliveryStatus::Failed, Some(err.to_string())),
+                },
+                Err(err) => (DeliveryStatus::Failed, Some(err.to_string())),
+            };
+            let _ = record_delivery_result(
+                &state,
+                &message.id,
+                &peer,
+                attempted_at_ms,
+                outcome.0,
+                outcome.1.as_deref(),
+            );
         }
     });
 }
@@ -1073,8 +1386,7 @@ fn valid_peer_info(peer: &PeerInfo) -> bool {
 }
 
 fn valid_message_payload(message: &ChatMessage) -> bool {
-    message.id.len() == 64
-        && message.id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    valid_message_id(&message.id)
         && valid_node_id(&message.author_node_id)
         && valid_room(&message.room)
         && valid_chat_text(&message.text)
@@ -1095,6 +1407,46 @@ fn valid_room(room: &str) -> bool {
 
 fn valid_chat_text(text: &str) -> bool {
     !text.trim().is_empty() && text.len() <= MAX_CHAT_TEXT_BYTES
+}
+
+fn valid_message_id(message_id: &str) -> bool {
+    message_id.len() == 64 && message_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_agent_id(agent_id: &str) -> bool {
+    !agent_id.is_empty()
+        && agent_id.len() <= MAX_AGENT_ID_BYTES
+        && agent_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'@'))
+}
+
+fn valid_agent_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name.len() <= MAX_AGENT_NAME_BYTES
+        && !name.bytes().any(|byte| byte.is_ascii_control())
+}
+
+fn valid_capabilities(capabilities: &[String]) -> bool {
+    capabilities.len() <= MAX_CAPABILITIES
+        && capabilities.iter().all(|capability| {
+            !capability.is_empty()
+                && capability.len() <= MAX_CAPABILITY_BYTES
+                && capability.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/')
+                })
+        })
+}
+
+fn truncate_delivery_error(error: &str) -> String {
+    if error.len() <= MAX_DELIVERY_ERROR_BYTES {
+        error.to_owned()
+    } else {
+        error
+            .chars()
+            .take(MAX_DELIVERY_ERROR_BYTES)
+            .collect::<String>()
+    }
 }
 
 fn valid_nonce(nonce: &str) -> bool {
@@ -1433,7 +1785,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -1502,6 +1854,60 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn delivery_records_are_listed() {
+        let state = test_state();
+        let message = state.key.sign_chat("default", 123, "hello");
+        remember_peer(
+            &state,
+            PeerInfo {
+                node_url: "http://peer".to_owned(),
+                node_id: "b".repeat(64),
+                name: None,
+            },
+            "test",
+        )
+        .unwrap();
+        trust_peer_record(&state, &"b".repeat(64)).unwrap();
+        let peer = trusted_peers(&state).remove(0);
+        let attempted_at_ms = record_delivery_pending(&state, &message.id, &peer).unwrap();
+        record_delivery_result(
+            &state,
+            &message.id,
+            &peer,
+            attempted_at_ms,
+            DeliveryStatus::Delivered,
+            None,
+        )
+        .unwrap();
+
+        let deliveries = list_delivery_records(&state, &message.id).unwrap();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].status, DeliveryStatus::Delivered);
+        assert_eq!(deliveries[0].peer_node_id, "b".repeat(64));
+    }
+
+    #[test]
+    fn agent_heartbeat_persists_agent() {
+        let state = test_state();
+        store_agent(
+            &state,
+            AgentRecord {
+                node_id: state.key.node_id(),
+                agent_id: "pi".to_owned(),
+                name: "Pi".to_owned(),
+                capabilities: vec!["rust".to_owned(), "review".to_owned()],
+                last_seen_ms: 100,
+                expires_at_ms: 200,
+            },
+        )
+        .unwrap();
+        let agents = list_agents(&state).unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "Pi");
+        assert_eq!(agents[0].capabilities, vec!["rust", "review"]);
     }
 
     #[test]
@@ -1599,6 +2005,44 @@ mod tests {
         let peer: PeerRecord = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(peer.trust_state, PeerTrustState::Unknown);
         assert_eq!(peer.source, "manual");
+    }
+
+    #[tokio::test]
+    async fn agent_heartbeat_route_requires_local_client() {
+        let state = test_state();
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/agents/heartbeat")
+                    .extension(ConnectInfo(local_addr()))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"name":"Pi","capabilities":["rust"],"ttl_secs":120}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let agent: AgentRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(agent.name, "Pi");
+        assert_eq!(agent.capabilities, vec!["rust"]);
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/agents/heartbeat")
+                    .extension(ConnectInfo(remote_addr()))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"name":"Bad"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

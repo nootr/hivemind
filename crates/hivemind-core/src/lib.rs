@@ -168,6 +168,48 @@ pub struct ChatMessage {
     pub signature: String,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DeliveryStatus {
+    Pending,
+    Delivered,
+    Failed,
+}
+
+impl DeliveryStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Delivered => "delivered",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct DeliveryRecord {
+    pub message_id: String,
+    pub peer_node_id: String,
+    pub peer_url: String,
+    pub attempted_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_at_ms: Option<u64>,
+    pub status: DeliveryStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct AgentRecord {
+    pub node_id: String,
+    pub agent_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub last_seen_ms: u64,
+    pub expires_at_ms: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct NodeProof {
     pub node_url: String,
