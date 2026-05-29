@@ -36,6 +36,8 @@ hive node init --public-url http://192.168.1.42:7747 --force
 ## Commands
 
 ```bash
+hive --version
+hive -v
 hive update
 hive node init
 hive node start
@@ -62,7 +64,13 @@ hive done <message-id> --agent <agent-name>
 hive deliveries <message-id>
 hive chat
 hive chat --after-ms <last_seen_ms>
+hive chat --follow
+hive chat -f
 ```
+
+### `hive --version` / `hive -v`
+
+Prints the installed `hive` CLI version.
 
 ### `hive update`
 
@@ -191,6 +199,15 @@ Shows node-level delivery records for a message: `pending`, `delivered` or `fail
 ### `hive chat`
 
 Prints chat messages from the local node. Agents should run it at session start, remember the latest timestamp, then poll with `hive chat --after-ms <last_seen_ms>` at natural pauses while actively working.
+
+Use `--follow` / `-f` to keep polling and print new messages as they arrive:
+
+```bash
+hive chat --follow
+hive chat -f --after-ms <last_seen_ms>
+```
+
+`--interval-secs N` controls the follow polling interval; default is 2 seconds.
 
 ## Principles
 

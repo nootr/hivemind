@@ -17,7 +17,11 @@ const DEFAULT_REPO_URL: &str = "https://github.com/nootr/hivemind";
 const DEFAULT_INSTALL_URL: &str = "https://hivemind.jhx.app/install.sh";
 
 #[derive(Debug, Parser, Eq, PartialEq)]
-#[command(name = "hive")]
+#[command(
+    name = "hive",
+    disable_version_flag = true,
+    after_help = "Version: hive --version | hive -v"
+)]
 pub struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -81,6 +85,10 @@ pub enum Command {
         room: String,
         #[arg(long, default_value_t = 0)]
         after_ms: u64,
+        #[arg(short = 'f', long = "follow")]
+        follow: bool,
+        #[arg(long, default_value_t = 2)]
+        interval_secs: u64,
     },
     Inbox {
         #[arg(long, default_value = "default")]
@@ -259,10 +267,26 @@ struct AgentsResponse {
 }
 
 pub async fn run() -> Result<(), CliError> {
+    if version_requested(env::args()) {
+        println!("hive {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let cli = Cli::parse();
     let output = execute(cli, &reqwest::Client::new()).await?;
     println!("{output}");
     Ok(())
+}
+
+fn version_requested<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    matches!(args.as_slice(), [_, flag] if flag == "-v" || flag == "--version")
 }
 
 pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliError> {
@@ -319,7 +343,18 @@ pub async fn execute(cli: Cli, client: &reqwest::Client) -> Result<String, CliEr
             room,
             wait_secs,
         } => ask(client, &text, &room, wait_secs).await,
-        Command::Chat { room, after_ms } => chat(client, &room, after_ms).await,
+        Command::Chat {
+            room,
+            after_ms,
+            follow,
+            interval_secs,
+        } => {
+            if follow {
+                chat_follow(client, &room, after_ms, interval_secs).await
+            } else {
+                chat(client, &room, after_ms).await
+            }
+        }
         Command::Inbox { room, all } => inbox(client, &room, all).await,
         Command::Read {
             message_id,
@@ -1234,6 +1269,31 @@ async fn inbox(client: &reqwest::Client, room: &str, all: bool) -> Result<String
         .join("\n"))
 }
 
+async fn chat_follow(
+    client: &reqwest::Client,
+    room: &str,
+    after_ms: u64,
+    interval_secs: u64,
+) -> Result<String, CliError> {
+    if interval_secs == 0 {
+        return Err(CliError::NodeControlFailed(
+            "follow interval must be greater than zero".to_owned(),
+        ));
+    }
+    let mut last_seen_ms = after_ms;
+    loop {
+        let messages = fetch_messages(client, room, last_seen_ms).await?.messages;
+        if !messages.is_empty() {
+            let authors = author_trust(client).await?;
+            for message in messages {
+                last_seen_ms = last_seen_ms.max(message.created_at_ms);
+                println!("{}", format_chat_line(&message, &authors));
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+    }
+}
+
 async fn watch(client: &reqwest::Client, options: WatchOptions<'_>) -> Result<String, CliError> {
     if options.interval_secs == 0 || options.heartbeat_secs == 0 || options.ttl_secs == 0 {
         return Err(CliError::NodeControlFailed(
@@ -1741,6 +1801,38 @@ mod tests {
             Cli {
                 command: Command::Deliveries {
                     message_id: "a".repeat(64),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn detects_version_request() {
+        assert!(version_requested(["hive", "-v"]));
+        assert!(version_requested(["hive", "--version"]));
+        assert!(!version_requested(["hive", "chat", "-f"]));
+    }
+
+    #[test]
+    fn parses_chat_follow() {
+        assert_eq!(
+            Cli::parse_from([
+                "hive",
+                "chat",
+                "--room",
+                "ops",
+                "--after-ms",
+                "123",
+                "--follow",
+                "--interval-secs",
+                "1"
+            ]),
+            Cli {
+                command: Command::Chat {
+                    room: "ops".to_owned(),
+                    after_ms: 123,
+                    follow: true,
+                    interval_secs: 1,
                 }
             }
         );
