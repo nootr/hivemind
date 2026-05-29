@@ -37,6 +37,8 @@ hive join <other-machine-advertised-node-url>
 hive peers
 ```
 
+Discovery sends both limited broadcast (`255.255.255.255:7748`) and interface-directed broadcasts such as `10.0.1.255:7748`. If discovery fails on a real LAN, check local firewall settings, Wi-Fi/AP client isolation and whether UDP port `7748` is allowed.
+
 Expected:
 
 - each side lists the other as `unknown`;
@@ -54,6 +56,23 @@ hive peers
 ```
 
 Run on both machines. Trust is local and must be mutual for reliable two-way chat.
+
+## Agent presence
+
+On each machine with an active agent session:
+
+```bash
+hive watch --agent <agent-name> --capabilities rust,review
+```
+
+Or, if you do not want the foreground watcher, refresh presence manually:
+
+```bash
+hive agent heartbeat --name <agent-name> --capabilities rust,review
+hive agents
+```
+
+Expected: trusted peers can see active/stale agent heartbeats with `hive agents`.
 
 ## Chat
 

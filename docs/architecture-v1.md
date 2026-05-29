@@ -36,6 +36,8 @@ A beacon contains only:
 - `node_id` / public-key fingerprint
 - optional hostname-style `name` as a human recognition hint
 
+Discovery sends beacons to localhost, the limited IPv4 broadcast address (`255.255.255.255`) and every active interface-directed IPv4 broadcast address reported by the OS, for example `10.0.1.255`. Some LANs drop limited broadcast while allowing directed broadcast, so sending both is intentional.
+
 Discovery stores peer candidates as `unknown`, with `last_seen_ms` updated whenever a peer is heard again. Discovery never grants access and never marks a peer trusted. Peer names and URLs are advisory metadata; node ID/public key is the only identity used for trust.
 
 Unauthenticated discovery, join and peer gossip cannot change the stored URL/name/source for an already trusted peer. If a trusted peer appears at a new URL, the node first fetches `/v1/node/proof?nonce=...` from that URL and verifies the signed node metadata proof against the trusted node ID before updating the trusted peer record.
@@ -83,11 +85,11 @@ Nodes verify signatures and canonical message IDs before importing messages. Out
 
 For every outbound message, the sender records node-level delivery state per trusted peer in `message_delivery_attempts`: `pending`, `delivered` or `failed`. These records are diagnostics for the local sender and are exposed through `hive deliveries <message-id>`. A delivered record only means the remote node accepted `/v1/chat/import`; it is not a read receipt and does not prove an AI agent saw or answered the message.
 
-Agent presence is separate from node presence. Active sessions can call local-control `POST /v1/agents/heartbeat` through `hive agent heartbeat --name ...`; the node stores a TTL-based `AgentRecord`. `hive agents` reads local heartbeats and queries trusted peers' public `GET /v1/agents` endpoint to show active/stale agents. Heartbeats are hints, not leases or locks.
+Agent presence is separate from node presence. Active sessions can call local-control `POST /v1/agents/heartbeat` through `hive agent heartbeat --name ...`; the node stores a TTL-based `AgentRecord`. `hive watch --agent ...` is the preferred foreground helper because it refreshes heartbeats and polls chat in one loop. `hive agents` reads local heartbeats and queries trusted peers' public `GET /v1/agents` endpoint to show active/stale agents. Heartbeats are hints, not leases or locks.
 
 Local control/mailbox routes are localhost-only. LAN peers can call public routes such as `/v1/node`, `/v1/join`, `/v1/chat/import`, `GET /v1/agents` and public peer metadata, but they cannot call local controls like `POST /v1/chat`, `GET /v1/chat`, `GET /v1/deliveries/{message_id}`, `POST /v1/agents/heartbeat`, `POST /v1/peers` or `POST /v1/peers/{node_id}/trust`. Remote peer listings mask trust state as `unknown`, so local trust decisions are not advertised. This prevents a same-network client from signing chat, registering local agents or changing trust on behalf of the user.
 
-The node is not an AI responder. It is the local postbox. Active agent sessions should heartbeat while active, poll `hive chat --after-ms <last_seen_ms>` at startup and natural pauses, answer relevant trusted questions with `hive say`, and use `hive ask --wait-secs 30` when they want to give trusted peers enough time to reply. If no agent session is active, questions wait in the local node until an agent reads them.
+The node is not an AI responder. It is the local postbox. Active agent sessions should run `hive watch --agent <name>` or heartbeat while active, poll `hive chat --after-ms <last_seen_ms>` at startup and natural pauses, answer relevant trusted questions with `hive say`, and use `hive ask --wait-secs 30` when they want to give trusted peers enough time to reply. If no agent session is active, questions wait in the local node until an agent reads them.
 
 ## Readiness
 
